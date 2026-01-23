@@ -74,46 +74,102 @@ st.markdown(
 )
 
 # ============================================================
-# SUPABASE CONNECTION (READ ONLY) - Streamlit Secrets ONLY
+# SUPABASE / POSTGRES CONNECTION (Secrets.txt)
 # ============================================================
 
-def _get_db_url() -> str:
-    # Option A: single URL (recommended)
-    db_url = st.secrets.get("SUPABASE_DB_URL", "")
-    if isinstance(db_url, str) and db_url.strip():
-        return db_url.strip()
+SECRETS_TXT_PATH = r"C:\Users\TomekBaxter\Dropbox\football_app\Secrets.txt"
 
-    # Option B: build from components
-    host = st.secrets.get("SUPABASE_HOST", "")
-    port = st.secrets.get("SUPABASE_PORT", "")
-    db = st.secrets.get("SUPABASE_DB", "")
-    user = st.secrets.get("SUPABASE_USER", "")
-    pw = st.secrets.get("SUPABASE_PASS", "")
+def _read_kv_file(path: str) -> dict:
+    out: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except FileNotFoundError:
+        return {}
+    return out
 
-    missing = [k for k, v in {
-        "SUPABASE_HOST": host,
-        "SUPABASE_PORT": port,
-        "SUPABASE_DB": db,
-        "SUPABASE_USER": user,
-        "SUPABASE_PASS": pw,
-    }.items() if not str(v).strip()]
+def _build_db_url_from_txt(path: str) -> str:
+    kv = _read_kv_file(path)
+
+    host = kv.get("SUPABASE_HOST", "").strip()
+    port = kv.get("SUPABASE_PORT", "").strip()
+    db = kv.get("SUPABASE_DB", "").strip()
+    user = kv.get("SUPABASE_USER", "").strip()
+    pw = kv.get("SUPABASE_PASS", "").strip()
+
+    missing = [
+        k for k, val in {
+            "SUPABASE_HOST": host,
+            "SUPABASE_PORT": port,
+            "SUPABASE_DB": db,
+            "SUPABASE_USER": user,
+            "SUPABASE_PASS": pw,
+        }.items()
+        if not val
+    ]
 
     if missing:
-        st.error(f"Missing Streamlit secrets: {', '.join(missing)}")
+        st.error(f"Secrets.txt is missing values for: {', '.join(missing)}")
         st.stop()
 
-    return (
-        f"postgresql+psycopg2://{quote_plus(str(user).strip())}:{quote_plus(str(pw).strip())}"
-        f"@{str(host).strip()}:{str(port).strip()}/{str(db).strip()}"
+    user_q = quote_plus(user)
+    pw_q = quote_plus(pw)
+
+    return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
+
+def _get_db_url() -> str:
+    # 1) Streamlit Cloud secrets (preferred)
+    try:
+        if "SUPABASE_DB_URL" in st.secrets and str(st.secrets["SUPABASE_DB_URL"]).strip():
+            return str(st.secrets["SUPABASE_DB_URL"]).strip()
+
+        needed = ["SUPABASE_HOST", "SUPABASE_PORT", "SUPABASE_DB", "SUPABASE_USER", "SUPABASE_PASS"]
+        if all(k in st.secrets and str(st.secrets[k]).strip() for k in needed):
+            host = str(st.secrets["SUPABASE_HOST"]).strip()
+            port = str(st.secrets["SUPABASE_PORT"]).strip()
+            db = str(st.secrets["SUPABASE_DB"]).strip()
+            user = str(st.secrets["SUPABASE_USER"]).strip()
+            pw = str(st.secrets["SUPABASE_PASS"]).strip()
+
+            user_q = quote_plus(user)
+            pw_q = quote_plus(pw)
+            return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
+    except Exception:
+        # If st.secrets isn't available for any reason, fall back to file below
+        pass
+
+    # 2) Local dev fallback (your Windows Secrets.txt)
+    return _build_db_url_from_txt(SECRETS_TXT_PATH)
+
+
+@st.cache_resource
+def get_engine():
+    return create_engine(
+        _get_db_url(),
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=5,
+        future=True,
     )
 
-engine = create_engine(
-    _get_db_url(),
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=0,
-)
+ENGINE = get_engine()
 
+def read_sql_df(sql: str, params: dict | None = None) -> pd.DataFrame:
+    with ENGINE.begin() as conn:
+        return pd.read_sql(text(sql), conn, params=params or {})
+
+def read_sql_one(sql: str, params: dict | None = None) -> dict | None:
+    df = read_sql_df(sql, params=params)
+    if df.empty:
+        return None
+    return df.iloc[0].to_dict()
 
 # ============================================================
 # LOAD DATA
