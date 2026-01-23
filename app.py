@@ -73,39 +73,33 @@ st.markdown(
 # SUPABASE / POSTGRES CONNECTION (STREAMLIT SECRETS ONLY)
 # ============================================================
 
+from streamlit.errors import StreamlitSecretNotFoundError
+
 def _get_db_url() -> str:
-    # Option A: single URL
-    db_url = st.secrets.get("SUPABASE_DB_URL", "")
-    if isinstance(db_url, str) and db_url.strip():
-        return db_url.strip()
-
-    # Option B: build from components
-    host = st.secrets.get("SUPABASE_HOST", "")
-    port = st.secrets.get("SUPABASE_PORT", "")
-    db = st.secrets.get("SUPABASE_DB", "")
-    user = st.secrets.get("SUPABASE_USER", "")
-    pw = st.secrets.get("SUPABASE_PASS", "")
-
-    missing = [k for k, v in {
-        "SUPABASE_HOST": host,
-        "SUPABASE_PORT": port,
-        "SUPABASE_DB": db,
-        "SUPABASE_USER": user,
-        "SUPABASE_PASS": pw,
-    }.items() if not str(v).strip()]
-
-    if missing:
-        st.error(f"Missing Streamlit secrets: {', '.join(missing)}")
+    # On Streamlit Cloud, secrets are always available via Manage App -> Secrets.
+    # Locally (without secrets.toml), we fail cleanly with an actionable message.
+    try:
+        db_url = st.secrets.get("SUPABASE_DB_URL", "")
+    except StreamlitSecretNotFoundError:
+        st.error(
+            "Missing Streamlit Secrets. This app is designed for public deployment on Streamlit Cloud.\n\n"
+            "Set SUPABASE_DB_URL in Streamlit Cloud: Manage app -> Settings -> Secrets."
+        )
         st.stop()
 
-    return (
-        f"postgresql+psycopg2://{quote_plus(str(user).strip())}:{quote_plus(str(pw).strip())}"
-        f"@{str(host).strip()}:{str(port).strip()}/{str(db).strip()}?sslmode=require"
-    )
+    if not isinstance(db_url, str) or not db_url.strip():
+        st.error(
+            "SUPABASE_DB_URL is missing or empty in Streamlit Secrets.\n\n"
+            "Go to: Manage app -> Settings -> Secrets and set SUPABASE_DB_URL."
+        )
+        st.stop()
+
+    return db_url.strip()
 
 @st.cache_resource
 def get_engine():
-    # Keep pool tiny for Streamlit Cloud + Supabase pooler stability
+    # Public app hardening: tiny pool (prevents Supabase pooler exhaustion),
+    # SSL enforced, and reliable reconnect behavior.
     return create_engine(
         _get_db_url(),
         pool_pre_ping=True,
@@ -118,17 +112,19 @@ def get_engine():
     )
 
 ENGINE = get_engine()
-engine = ENGINE  # compatibility for any code that uses `engine`
 
 def _db_healthcheck() -> None:
     try:
         with ENGINE.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception:
-        st.error("Database connection failed. Check Streamlit Secrets and Supabase connection limits.")
+        st.error(
+            "Database connection failed. Verify Streamlit Secrets for this app and check Supabase pooler limits."
+        )
         st.stop()
 
 _db_healthcheck()
+
 
 # ============================================================
 # LOAD DATA
