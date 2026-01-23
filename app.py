@@ -74,35 +74,21 @@ st.markdown(
 )
 
 # ============================================================
-# SUPABASE CONNECTION (READ ONLY) - Secrets.txt (LOCAL)
+# SUPABASE CONNECTION (READ ONLY) - Streamlit Secrets ONLY
 # ============================================================
 
-SECRETS_TXT_PATH = r"C:\Users\TomekBaxter\Dropbox\football_app\Secrets.txt"
+def _get_db_url() -> str:
+    # Option A: single URL (recommended)
+    db_url = st.secrets.get("SUPABASE_DB_URL", "")
+    if isinstance(db_url, str) and db_url.strip():
+        return db_url.strip()
 
-def _read_kv_file(path: str) -> dict:
-    out: dict[str, str] = {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
-    except FileNotFoundError:
-        return {}
-    return out
-
-def _get_db_url_from_txt() -> str:
-    kv = _read_kv_file(SECRETS_TXT_PATH)
-
-    host = kv.get("SUPABASE_HOST", "").strip()
-    port = kv.get("SUPABASE_PORT", "").strip()
-    db = kv.get("SUPABASE_DB", "").strip()
-    user = kv.get("SUPABASE_USER", "").strip()
-    pw = kv.get("SUPABASE_PASS", "").strip()
+    # Option B: build from components
+    host = st.secrets.get("SUPABASE_HOST", "")
+    port = st.secrets.get("SUPABASE_PORT", "")
+    db = st.secrets.get("SUPABASE_DB", "")
+    user = st.secrets.get("SUPABASE_USER", "")
+    pw = st.secrets.get("SUPABASE_PASS", "")
 
     missing = [k for k, v in {
         "SUPABASE_HOST": host,
@@ -110,20 +96,24 @@ def _get_db_url_from_txt() -> str:
         "SUPABASE_DB": db,
         "SUPABASE_USER": user,
         "SUPABASE_PASS": pw,
-    }.items() if not v]
+    }.items() if not str(v).strip()]
 
     if missing:
-        st.error(f"Secrets.txt is missing values for: {', '.join(missing)}")
+        st.error(f"Missing Streamlit secrets: {', '.join(missing)}")
         st.stop()
 
-    return f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(pw)}@{host}:{port}/{db}"
+    return (
+        f"postgresql+psycopg2://{quote_plus(str(user).strip())}:{quote_plus(str(pw).strip())}"
+        f"@{str(host).strip()}:{str(port).strip()}/{str(db).strip()}"
+    )
 
 engine = create_engine(
-    _get_db_url_from_txt(),
+    _get_db_url(),
     pool_pre_ping=True,
     pool_size=5,
     max_overflow=0,
 )
+
 
 # ============================================================
 # LOAD DATA
