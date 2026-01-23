@@ -1,0 +1,46 @@
+# ===============================
+# Secrets / credentials
+# ===============================
+Secrets.txt
+.env
+.env.*
+*.key
+*.pem
+
+# Streamlit secrets (local only)
+.streamlit/secrets.toml
+
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# ===============================
+# Virtual environments
+# ===============================
+venv/
+.venv/
+env/
+ENV/
+
+# ===============================
+# OS / Editor junk
+# ===============================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ===============================
+# Logs / temp files
+# ===============================
+*.log
+*.tmp
+*.cache
