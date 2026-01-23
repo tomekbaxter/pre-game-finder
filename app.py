@@ -1,12 +1,10 @@
-import os
-import datetime as dt
+import pandas as pd
+import streamlit as st
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
 
-import streamlit as st
-import pandas as pd
 from sqlalchemy import create_engine, text
-from datetime import datetime
 
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
@@ -20,7 +18,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Remove Streamlit header bar + tighten padding
 st.markdown(
     """
     <style>
@@ -32,7 +29,6 @@ st.markdown(
 )
 
 TZ = ZoneInfo("Europe/London")
-NOW = datetime.now(TZ).replace(tzinfo=None)
 
 # ============================================================
 # GLOBAL STYLING
@@ -74,102 +70,65 @@ st.markdown(
 )
 
 # ============================================================
-# SUPABASE / POSTGRES CONNECTION (Secrets.txt)
+# SUPABASE / POSTGRES CONNECTION (STREAMLIT SECRETS ONLY)
 # ============================================================
 
-SECRETS_TXT_PATH = r"C:\Users\TomekBaxter\Dropbox\football_app\Secrets.txt"
+def _get_db_url() -> str:
+    # Option A: single URL
+    db_url = st.secrets.get("SUPABASE_DB_URL", "")
+    if isinstance(db_url, str) and db_url.strip():
+        return db_url.strip()
 
-def _read_kv_file(path: str) -> dict:
-    out: dict[str, str] = {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
-    except FileNotFoundError:
-        return {}
-    return out
+    # Option B: build from components
+    host = st.secrets.get("SUPABASE_HOST", "")
+    port = st.secrets.get("SUPABASE_PORT", "")
+    db = st.secrets.get("SUPABASE_DB", "")
+    user = st.secrets.get("SUPABASE_USER", "")
+    pw = st.secrets.get("SUPABASE_PASS", "")
 
-def _build_db_url_from_txt(path: str) -> str:
-    kv = _read_kv_file(path)
-
-    host = kv.get("SUPABASE_HOST", "").strip()
-    port = kv.get("SUPABASE_PORT", "").strip()
-    db = kv.get("SUPABASE_DB", "").strip()
-    user = kv.get("SUPABASE_USER", "").strip()
-    pw = kv.get("SUPABASE_PASS", "").strip()
-
-    missing = [
-        k for k, val in {
-            "SUPABASE_HOST": host,
-            "SUPABASE_PORT": port,
-            "SUPABASE_DB": db,
-            "SUPABASE_USER": user,
-            "SUPABASE_PASS": pw,
-        }.items()
-        if not val
-    ]
+    missing = [k for k, v in {
+        "SUPABASE_HOST": host,
+        "SUPABASE_PORT": port,
+        "SUPABASE_DB": db,
+        "SUPABASE_USER": user,
+        "SUPABASE_PASS": pw,
+    }.items() if not str(v).strip()]
 
     if missing:
-        st.error(f"Secrets.txt is missing values for: {', '.join(missing)}")
+        st.error(f"Missing Streamlit secrets: {', '.join(missing)}")
         st.stop()
 
-    user_q = quote_plus(user)
-    pw_q = quote_plus(pw)
-
-    return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
-
-def _get_db_url() -> str:
-    # 1) Streamlit Cloud secrets (preferred)
-    try:
-        if "SUPABASE_DB_URL" in st.secrets and str(st.secrets["SUPABASE_DB_URL"]).strip():
-            return str(st.secrets["SUPABASE_DB_URL"]).strip()
-
-        needed = ["SUPABASE_HOST", "SUPABASE_PORT", "SUPABASE_DB", "SUPABASE_USER", "SUPABASE_PASS"]
-        if all(k in st.secrets and str(st.secrets[k]).strip() for k in needed):
-            host = str(st.secrets["SUPABASE_HOST"]).strip()
-            port = str(st.secrets["SUPABASE_PORT"]).strip()
-            db = str(st.secrets["SUPABASE_DB"]).strip()
-            user = str(st.secrets["SUPABASE_USER"]).strip()
-            pw = str(st.secrets["SUPABASE_PASS"]).strip()
-
-            user_q = quote_plus(user)
-            pw_q = quote_plus(pw)
-            return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
-    except Exception:
-        # If st.secrets isn't available for any reason, fall back to file below
-        pass
-
-    # 2) Local dev fallback (your Windows Secrets.txt)
-    return _build_db_url_from_txt(SECRETS_TXT_PATH)
-
+    return (
+        f"postgresql+psycopg2://{quote_plus(str(user).strip())}:{quote_plus(str(pw).strip())}"
+        f"@{str(host).strip()}:{str(port).strip()}/{str(db).strip()}?sslmode=require"
+    )
 
 @st.cache_resource
 def get_engine():
+    # Keep pool tiny for Streamlit Cloud + Supabase pooler stability
     return create_engine(
         _get_db_url(),
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=5,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=15,
+        pool_recycle=300,
+        connect_args={"sslmode": "require"},
         future=True,
     )
 
 ENGINE = get_engine()
+engine = ENGINE  # compatibility for any code that uses `engine`
 
-def read_sql_df(sql: str, params: dict | None = None) -> pd.DataFrame:
-    with ENGINE.begin() as conn:
-        return pd.read_sql(text(sql), conn, params=params or {})
+def _db_healthcheck() -> None:
+    try:
+        with ENGINE.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        st.error("Database connection failed. Check Streamlit Secrets and Supabase connection limits.")
+        st.stop()
 
-def read_sql_one(sql: str, params: dict | None = None) -> dict | None:
-    df = read_sql_df(sql, params=params)
-    if df.empty:
-        return None
-    return df.iloc[0].to_dict()
+_db_healthcheck()
 
 # ============================================================
 # LOAD DATA
@@ -207,7 +166,7 @@ def load_fixtures() -> pd.DataFrame:
         """
     )
 
-    df = pd.read_sql(sql, engine)
+    df = pd.read_sql(sql, ENGINE)
 
     df = df.rename(
         columns={
@@ -236,7 +195,6 @@ def load_fixtures() -> pd.DataFrame:
         }
     )
 
-    # Build kickoff datetime (naive; assumed Europe/London local)
     df["KickoffDT"] = pd.to_datetime(
         df["Date"].astype(str) + " " + df["Kickoff"].astype(str),
         errors="coerce",
@@ -252,35 +210,28 @@ def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    now = datetime.now(TZ).replace(tzinfo=None)
+
     df = df.copy()
 
-    # Odds present
     for c in ["Home", "Draw", "Away"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["Home", "Draw", "Away"])
     df = df[(df["Home"] > 0) & (df["Draw"] > 0) & (df["Away"] > 0)]
 
-    # Valid kickoff datetime and future only
     df = df[df["KickoffDT"].notna()]
-    df = df[df["KickoffDT"] > NOW]
+    df = df[df["KickoffDT"] > now]
 
     return df.sort_values("KickoffDT")
 
 # ============================================================
-# FILTERS (KEEP LOGIC LOCAL TO EACH FUNCTION)
+# FILTERS
 # ============================================================
 
 def filter_all(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    SODD filter (NO COSOD):
-    - Only cares about signal strength: abs(SODD) >= 7
-    - Advantaged side determined by SODD sign
-    - Applies odds acceptance curve + implied probability cap
-    """
-
     S0 = 7.0
     S1 = 10.0
     ODDS0 = 1.60
@@ -306,7 +257,6 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
 
     adv_home = df["SODD"] > 0
     adv_away = df["SODD"] < 0
-
     df = df[adv_home | adv_away].copy()
     if df.empty:
         return df
@@ -316,7 +266,6 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     adv_odds.loc[adv_away] = df.loc[adv_away, "Away"]
 
     s_abs = df["SODD"].abs()
-
     if S1 > S0:
         required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
     else:
@@ -341,15 +290,6 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    SODD + COSOD filter:
-    - Lower SODD threshold (abs(SODD) >= S0)
-    - Advantaged side determined by SODD sign
-    - COSOD alignment required:
-        advantaged COSOD > 0 and weaker COSOD < 0
-    - Applies odds acceptance curve + implied probability cap
-    """
-
     S0 = 3.0
     S1 = 7.0
     ODDS0 = 2.20
@@ -384,7 +324,6 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
 
     cosod_adv.loc[adv_home] = df.loc[adv_home, "HCOSOD"]
     cosod_weak.loc[adv_home] = df.loc[adv_home, "ACOSOD"]
-
     cosod_adv.loc[adv_away] = df.loc[adv_away, "ACOSOD"]
     cosod_weak.loc[adv_away] = df.loc[adv_away, "HCOSOD"]
 
@@ -401,7 +340,6 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
         required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
     else:
         required_odds = pd.Series(ODDS1, index=df.index)
-
     required_odds = required_odds.clip(lower=ODDS1)
 
     df = df[adv_odds >= required_odds].copy()
@@ -571,23 +509,11 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Head-to-Head UNDERDOG ADVANTAGE filter
-
-    Shows fixtures where:
-    - Teams played each other in the last 90 days (most recent H2H only)
-    - Historical match has valid stats (not placeholder stats)
-    - The CURRENT underdog (higher odds) had:
-        * more shots on target
-        * more dangerous attacks
-      in that most recent H2H
-    """
-
     if df.empty:
         return df
 
-    LOOKBACK_DAYS = 90
-    cutoff_date = (NOW - pd.Timedelta(days=LOOKBACK_DAYS)).date()
+    now = datetime.now(TZ).replace(tzinfo=None)
+    cutoff_date = (now - pd.Timedelta(days=90)).date()
 
     sql = text(
         """
@@ -608,7 +534,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         """
     )
 
-    h2h = pd.read_sql(sql, engine, params={"cutoff_date": cutoff_date})
+    h2h = pd.read_sql(sql, ENGINE, params={"cutoff_date": cutoff_date})
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -636,7 +562,6 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         (total_sot >= total_goals) &
         (total_shots >= 6)
     ].copy()
-
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -683,7 +608,6 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df["Home"] > df["Away"], "UnderdogSide"] = "Home"
     df.loc[df["Away"] > df["Home"], "UnderdogSide"] = "Away"
     df = df[df["UnderdogSide"].notna()].copy()
-
     if df.empty:
         return df
 
@@ -713,7 +637,7 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     return df.iloc[0:0]
 
 # ============================================================
-# FILTER REGISTRY (7 BUTTONS)
+# FILTER REGISTRY
 # ============================================================
 
 FILTERS = [
@@ -733,7 +657,7 @@ FILTERS = [
 st.markdown("## Pre-Game Finder")
 
 # ============================================================
-# BUTTON BAR (7 BUTTONS)
+# BUTTON BAR
 # ============================================================
 
 if "active_filter" not in st.session_state:
@@ -773,7 +697,7 @@ df_view = df[DISPLAY_COLS] if not df.empty else pd.DataFrame(columns=DISPLAY_COL
 st.markdown(f"**Fixtures ({len(df_view)})**")
 
 # ============================================================
-# AG GRID (TABLE)
+# AG GRID
 # ============================================================
 
 row_style = JsCode(
