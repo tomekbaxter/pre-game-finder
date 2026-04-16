@@ -2,11 +2,9 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, text
-
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
+from streamlit.errors import StreamlitSecretNotFoundError
 
 # ============================================================
 # PAGE CONFIG
@@ -64,6 +62,12 @@ st.markdown(
         background-color: #1a2233;
         border-color: #3b4252;
     }
+
+    div[data-testid="stDataFrame"] {
+        border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 10px;
+        overflow: hidden;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -73,24 +77,19 @@ st.markdown(
 # SUPABASE / POSTGRES CONNECTION (STREAMLIT SECRETS ONLY)
 # ============================================================
 
-from streamlit.errors import StreamlitSecretNotFoundError
-
 def _get_db_url() -> str:
-    # On Streamlit Cloud, secrets are always available via Manage App -> Secrets.
-    # Locally (without secrets.toml), we fail cleanly with an actionable message.
     try:
         db_url = st.secrets.get("SUPABASE_DB_URL", "")
     except StreamlitSecretNotFoundError:
         st.error(
-            "Missing Streamlit Secrets. This app is designed for public deployment on Streamlit Cloud.\n\n"
-            "Set SUPABASE_DB_URL in Streamlit Cloud: Manage app -> Settings -> Secrets."
+            "Missing Streamlit Secrets.\n\n"
+            "Set SUPABASE_DB_URL in Streamlit Cloud or local secrets.toml."
         )
         st.stop()
 
     if not isinstance(db_url, str) or not db_url.strip():
         st.error(
-            "SUPABASE_DB_URL is missing or empty in Streamlit Secrets.\n\n"
-            "Go to: Manage app -> Settings -> Secrets and set SUPABASE_DB_URL."
+            "SUPABASE_DB_URL is missing or empty in Streamlit Secrets."
         )
         st.stop()
 
@@ -98,8 +97,6 @@ def _get_db_url() -> str:
 
 @st.cache_resource
 def get_engine():
-    # Public app hardening: tiny pool (prevents Supabase pooler exhaustion),
-    # SSL enforced, and reliable reconnect behavior.
     return create_engine(
         _get_db_url(),
         pool_pre_ping=True,
@@ -117,14 +114,11 @@ def _db_healthcheck() -> None:
     try:
         with ENGINE.connect() as conn:
             conn.execute(text("SELECT 1"))
-    except Exception:
-        st.error(
-            "Database connection failed. Verify Streamlit Secrets for this app and check Supabase pooler limits."
-        )
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
         st.stop()
 
 _db_healthcheck()
-
 
 # ============================================================
 # LOAD DATA
@@ -688,94 +682,39 @@ DISPLAY_COLS = [
     "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Score", "Value",
 ]
 
-df_view = df[DISPLAY_COLS] if not df.empty else pd.DataFrame(columns=DISPLAY_COLS)
+df_view = df[DISPLAY_COLS].copy() if not df.empty else pd.DataFrame(columns=DISPLAY_COLS)
+
+# ============================================================
+# CLEAN DISPLAY TYPES
+# ============================================================
+
+numeric_cols = [
+    "Home", "Draw", "Away", "ComOpp", "SODD", "HCOSOD", "ACOSOD",
+    "XGH", "XGA", "ESOTH", "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Value"
+]
+
+for col in numeric_cols:
+    if col in df_view.columns:
+        df_view[col] = pd.to_numeric(df_view[col], errors="coerce")
+
+for col in df_view.columns:
+    if col not in numeric_cols:
+        df_view[col] = df_view[col].fillna("").astype(str)
 
 st.markdown(f"**Fixtures ({len(df_view)})**")
 
 # ============================================================
-# AG GRID
+# TABLE
 # ============================================================
 
-row_style = JsCode(
-    """
-    function(params) {
-      return {
-        background: params.node.rowIndex % 2 === 0 ? '#111827' : '#0e1117'
-      };
-    }
-    """
-)
-
-custom_css = {
-    ".ag-root-wrapper": {
-        "border": "1px solid rgba(255,255,255,0.15)",
-        "border-radius": "10px",
-    },
-    ".ag-header": {
-        "background-color": "#1f2937",
-        "border-bottom": "2px solid rgba(255,255,255,0.25)",
-    },
-    ".ag-header-cell-label": {
-        "color": "#f0f2f5",
-        "font-weight": "700",
-        "font-size": "14px",
-    },
-    ".ag-cell": {
-        "color": "#eaecef",
-        "font-size": "13px",
-        "white-space": "nowrap",
-        "padding-left": "8px",
-        "padding-right": "8px",
-    },
-}
-
-gb = GridOptionsBuilder.from_dataframe(df_view)
-
-for col in df_view.columns:
-    gb.configure_column(
-        col,
-        sortable=True,
-        filter=True,
-        resizable=True,
-        wrapText=False,
-        autoHeight=False,
-        minWidth=85,
-    )
-
-for col in ["HomeTeam", "AwayTeam", "League"]:
-    gb.configure_column(col, minWidth=190)
-
-gb.configure_grid_options(
-    domLayout="normal",
-    enableRangeSelection=True,
-    enableCellTextSelection=True,
-    suppressRowClickSelection=True,
-    getRowStyle=row_style,
-    rowHeight=30,
-    headerHeight=36,
-    onGridReady=JsCode(
-        """
-        function(params) {
-            params.api.sizeColumnsToFit();
-        }
-        """
-    ),
-)
-
-GRID_HEIGHT = max(140, 36 + 30 * (len(df_view) + 1))
-
-AgGrid(
+st.dataframe(
     df_view,
-    gridOptions=gb.build(),
-    height=GRID_HEIGHT,
-    update_mode=GridUpdateMode.NO_UPDATE,
-    theme="alpine-dark",
-    allow_unsafe_jscode=True,
-    custom_css=custom_css,
+    use_container_width=True,
+    height=700,
 )
 
 st.caption(
-    "Drag to select cells -> Ctrl+C to copy. "
+    "Use the table toolbar to search, sort, and download if available. "
     "Pre-Game Finder - Supabase-backed - internal read-only tool."
 )
 
