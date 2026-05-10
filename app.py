@@ -624,7 +624,144 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
-    return df.iloc[0:0]
+    """
+    League Table filter:
+    Shows fixtures where one team has at least 1.2x the opponent's points,
+    but is priced at least 1.1x bigger odds than the opponent.
+
+    Example:
+    Home points >= Away points * 1.2
+    AND Home odds >= Away odds * 1.1
+
+    OR
+
+    Away points >= Home points * 1.2
+    AND Away odds >= Home odds * 1.1
+    """
+
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    # Pull latest team standings from Supabase
+    sql = text(
+        """
+        SELECT
+            "League",
+            "TeamName",
+            "StandingPoints",
+            "StandingPosition",
+            "StandingGames"
+        FROM list_of_teams
+        WHERE "StandingGames" > 0
+        """
+    )
+
+    teams = pd.read_sql(sql, engine)
+
+    if teams.empty:
+        return df.iloc[0:0]
+
+    for c in ["StandingPoints", "StandingPosition", "StandingGames"]:
+        teams[c] = pd.to_numeric(teams[c], errors="coerce")
+
+    teams = teams.dropna(subset=["League", "TeamName", "StandingPoints", "StandingGames"])
+
+    # Home team join
+    home_standings = teams.rename(columns={
+        "TeamName": "HomeTeam",
+        "StandingPoints": "HomeStandingPoints",
+        "StandingPosition": "HomeStandingPosition",
+        "StandingGames": "HomeStandingGames",
+    })
+
+    df = df.merge(
+        home_standings[[
+            "League",
+            "HomeTeam",
+            "HomeStandingPoints",
+            "HomeStandingPosition",
+            "HomeStandingGames",
+        ]],
+        on=["League", "HomeTeam"],
+        how="left",
+    )
+
+    # Away team join
+    away_standings = teams.rename(columns={
+        "TeamName": "AwayTeam",
+        "StandingPoints": "AwayStandingPoints",
+        "StandingPosition": "AwayStandingPosition",
+        "StandingGames": "AwayStandingGames",
+    })
+
+    df = df.merge(
+        away_standings[[
+            "League",
+            "AwayTeam",
+            "AwayStandingPoints",
+            "AwayStandingPosition",
+            "AwayStandingGames",
+        ]],
+        on=["League", "AwayTeam"],
+        how="left",
+    )
+
+    required = [
+        "Home",
+        "Away",
+        "HomeStandingPoints",
+        "AwayStandingPoints",
+        "HomeStandingGames",
+        "AwayStandingGames",
+    ]
+
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df.dropna(subset=required)
+
+    if df.empty:
+        return df
+
+    # Avoid 0-point distortions
+    df = df[
+        (df["HomeStandingGames"] > 0) &
+        (df["AwayStandingGames"] > 0) &
+        (df["HomeStandingPoints"] > 0) &
+        (df["AwayStandingPoints"] > 0)
+    ].copy()
+
+    if df.empty:
+        return df
+
+    home_table_edge = (
+        (df["HomeStandingPoints"] >= df["AwayStandingPoints"] * 1.4) &
+        (df["Home"] >= df["Away"] * 1.2)
+    )
+
+    away_table_edge = (
+        (df["AwayStandingPoints"] >= df["HomeStandingPoints"] * 1.4) &
+        (df["Away"] >= df["Home"] * 1.2)
+    )
+
+    df = df[home_table_edge | away_table_edge].copy()
+
+    if df.empty:
+        return df
+
+    df["TableEdgeSide"] = None
+    df.loc[home_table_edge, "TableEdgeSide"] = "Home"
+    df.loc[away_table_edge, "TableEdgeSide"] = "Away"
+
+    df["HomePointsRatio"] = df["HomeStandingPoints"] / df["AwayStandingPoints"]
+    df["AwayPointsRatio"] = df["AwayStandingPoints"] / df["HomeStandingPoints"]
+    df["HomeOddsRatio"] = df["Home"] / df["Away"]
+    df["AwayOddsRatio"] = df["Away"] / df["Home"]
+
+    return df
+
 
 # ============================================================
 # FILTER REGISTRY
