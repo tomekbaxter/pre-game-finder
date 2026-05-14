@@ -624,11 +624,137 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    League Table filter:
+    Shows fixtures where the higher-positioned team also has higher odds.
+
+    Higher position = lower StandingPosition number.
+    Example:
+    Home position 2 vs Away position 8
+    AND Home odds > Away odds
+    """
 
     if df.empty:
         return df
 
     df = df.copy()
+
+    sql = text("""
+        SELECT
+            "League",
+            "TeamName",
+            "StandingPosition",
+            "StandingPPG",
+            "StandingGames"
+        FROM list_of_teams
+        WHERE
+            "StandingGames" > 0
+            AND "StandingPosition" > 0
+            AND "StandingPPG" IS NOT NULL
+    """)
+
+    try:
+        teams = pd.read_sql(sql, ENGINE)
+    except Exception as e:
+        st.warning("League table filter unavailable.")
+        st.code(str(e))
+        return df.iloc[0:0]
+
+    if teams.empty:
+        return df.iloc[0:0]
+
+    teams["League"] = teams["League"].fillna("").astype(str).str.strip()
+    teams["TeamName"] = teams["TeamName"].fillna("").astype(str).str.strip()
+
+    for col in ["StandingPosition", "StandingPPG", "StandingGames"]:
+        teams[col] = pd.to_numeric(teams[col], errors="coerce")
+
+    teams = teams.dropna(subset=[
+        "League",
+        "TeamName",
+        "StandingPosition",
+        "StandingPPG",
+        "StandingGames",
+    ])
+
+    df["League"] = df["League"].fillna("").astype(str).str.strip()
+    df["HomeTeam"] = df["HomeTeam"].fillna("").astype(str).str.strip()
+    df["AwayTeam"] = df["AwayTeam"].fillna("").astype(str).str.strip()
+
+    home_lookup = teams.rename(columns={
+        "TeamName": "HomeTeam",
+        "StandingPosition": "Home St.Pos",
+        "StandingPPG": "Home St.PPG",
+        "StandingGames": "Home St.Games",
+    })
+
+    df = df.merge(
+        home_lookup[["League", "HomeTeam", "Home St.Pos", "Home St.PPG", "Home St.Games"]],
+        on=["League", "HomeTeam"],
+        how="left",
+    )
+
+    away_lookup = teams.rename(columns={
+        "TeamName": "AwayTeam",
+        "StandingPosition": "Away St.Pos",
+        "StandingPPG": "Away St.PPG",
+        "StandingGames": "Away St.Games",
+    })
+
+    df = df.merge(
+        away_lookup[["League", "AwayTeam", "Away St.Pos", "Away St.PPG", "Away St.Games"]],
+        on=["League", "AwayTeam"],
+        how="left",
+    )
+
+    required = [
+        "Home",
+        "Away",
+        "Home St.Pos",
+        "Away St.Pos",
+        "Home St.PPG",
+        "Away St.PPG",
+        "Home St.Games",
+        "Away St.Games",
+    ]
+
+    for col in required:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=required)
+
+    if df.empty:
+        return df
+
+    MIN_GAMES = 5
+
+    df = df[
+        (df["Home St.Games"] >= MIN_GAMES) &
+        (df["Away St.Games"] >= MIN_GAMES)
+    ].copy()
+
+    if df.empty:
+        return df
+
+    home_edge = (
+        (df["Home St.Pos"] < df["Away St.Pos"]) &
+        (df["Home"] > df["Away"])
+    )
+
+    away_edge = (
+        (df["Away St.Pos"] < df["Home St.Pos"]) &
+        (df["Away"] > df["Home"])
+    )
+
+    df = df[home_edge | away_edge].copy()
+
+    if df.empty:
+        return df
+
+    df["Home St.PPG"] = df["Home St.PPG"].round(2)
+    df["Away St.PPG"] = df["Away St.PPG"].round(2)
+
+    return df
 
     # ========================================================
     # LOAD TEAM STANDINGS
@@ -830,9 +956,12 @@ if not df.empty:
 DISPLAY_COLS = [
     "EventID", "HomeTeam", "AwayTeam", "League",
     "Date", "Kickoff",
-    "Home", "Draw", "Away", "ComOpp",
+    "Home", "Draw", "Away",
+    "Home St.Pos", "Away St.Pos",
+    "Home St.PPG", "Away St.PPG",
+    "ComOpp",
     "SODD", "HCOSOD", "ACOSOD", "XGH", "XGA", "ESOTH",
-    "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Score", "Value",
+    "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Score",
 ]
 
 df_view = df[DISPLAY_COLS].copy() if not df.empty else pd.DataFrame(columns=DISPLAY_COLS)
@@ -842,10 +971,13 @@ df_view = df[DISPLAY_COLS].copy() if not df.empty else pd.DataFrame(columns=DISP
 # ============================================================
 
 numeric_cols = [
-    "Home", "Draw", "Away", "ComOpp", "SODD", "HCOSOD", "ACOSOD",
-    "XGH", "XGA", "ESOTH", "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Value"
+    "Home", "Draw", "Away",
+    "Home St.Pos", "Away St.Pos",
+    "Home St.PPG", "Away St.PPG",
+    "ComOpp", "SODD", "HCOSOD", "ACOSOD",
+    "XGH", "XGA", "ESOTH", "ESOTA",
+    "HomeWin%", "Draw%", "AwayWin%",
 ]
-
 for col in numeric_cols:
     if col in df_view.columns:
         df_view[col] = pd.to_numeric(df_view[col], errors="coerce")
