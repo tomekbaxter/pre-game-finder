@@ -892,7 +892,7 @@ if not df.empty:
     df_view = df.reindex(columns=DISPLAY_COLS).copy()
 else:
     df_view = pd.DataFrame(columns=DISPLAY_COLS)
-
+    
 numeric_cols = [
     "Home", "Draw", "Away",
     "Home St.Pos", "Away St.Pos",
