@@ -16,16 +16,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.markdown(
-    """
-    <style>
-    header[data-testid="stHeader"] { display: none; }
-    .block-container { padding-top: 1.2rem !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 TZ = ZoneInfo("Europe/London")
 
 # ============================================================
@@ -35,27 +25,34 @@ TZ = ZoneInfo("Europe/London")
 st.markdown(
     """
     <style>
+    header[data-testid="stHeader"] { display: none; }
+
     html, body, .stApp {
         background-color: #0e1117;
         color: #e6e6e6;
     }
 
     .block-container {
-        padding-top: 3rem;
+        padding-top: 1.1rem !important;
         padding-bottom: 0rem;
-        padding-left: 1.4rem;
-        padding-right: 1.4rem;
+        padding-left: 0.8rem;
+        padding-right: 0.8rem;
+    }
+
+    h2 {
+        margin-bottom: 0.25rem;
     }
 
     div.stButton > button {
         width: 100%;
-        height: 3.1em;
-        font-size: 1.05rem;
-        font-weight: 600;
+        height: 2.8em;
+        font-size: 0.95rem;
+        font-weight: 650;
         border-radius: 8px;
         background-color: #111827;
         color: #e6e6e6;
         border: 1px solid #2a2f3a;
+        padding: 0.25rem 0.35rem;
     }
 
     div.stButton > button:hover {
@@ -68,32 +65,50 @@ st.markdown(
         border-radius: 10px;
         overflow: hidden;
     }
+
+    @media (max-width: 768px) {
+        .block-container {
+            padding-left: 0.35rem !important;
+            padding-right: 0.35rem !important;
+            padding-top: 0.7rem !important;
+        }
+
+        div.stButton > button {
+            font-size: 0.72rem;
+            height: 2.55em;
+            padding: 0.1rem 0.15rem;
+        }
+
+        h2 {
+            font-size: 1.15rem !important;
+        }
+
+        p, div, span {
+            font-size: 0.85rem;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ============================================================
-# SUPABASE / POSTGRES CONNECTION (STREAMLIT SECRETS ONLY)
+# SUPABASE / POSTGRES CONNECTION
 # ============================================================
 
 def _get_db_url() -> str:
     try:
         db_url = st.secrets.get("SUPABASE_DB_URL", "")
     except StreamlitSecretNotFoundError:
-        st.error(
-            "Missing Streamlit Secrets.\n\n"
-            "Set SUPABASE_DB_URL in Streamlit Cloud or local secrets.toml."
-        )
+        st.error("Missing Streamlit Secrets. Set SUPABASE_DB_URL.")
         st.stop()
 
     if not isinstance(db_url, str) or not db_url.strip():
-        st.error(
-            "SUPABASE_DB_URL is missing or empty in Streamlit Secrets."
-        )
+        st.error("SUPABASE_DB_URL is missing or empty.")
         st.stop()
 
     return db_url.strip()
+
 
 @st.cache_resource
 def get_engine():
@@ -108,7 +123,9 @@ def get_engine():
         future=True,
     )
 
+
 ENGINE = get_engine()
+
 
 def _db_healthcheck() -> None:
     try:
@@ -118,10 +135,11 @@ def _db_healthcheck() -> None:
         st.error(f"Database connection failed: {e}")
         st.stop()
 
+
 _db_healthcheck()
 
 # ============================================================
-# LOAD DATA
+# LOAD FIXTURES
 # ============================================================
 
 @st.cache_data(ttl=60)
@@ -158,32 +176,30 @@ def load_fixtures() -> pd.DataFrame:
 
     df = pd.read_sql(sql, ENGINE)
 
-    df = df.rename(
-        columns={
-            "eventid": "EventID",
-            "hometeam": "HomeTeam",
-            "awayteam": "AwayTeam",
-            "league": "League",
-            "date": "Date",
-            "kickoff": "Kickoff",
-            "home": "Home",
-            "draw": "Draw",
-            "away": "Away",
-            "comopp": "ComOpp",
-            "sodd": "SODD",
-            "xgh": "XGH",
-            "xga": "XGA",
-            "esoth": "ESOTH",
-            "esota": "ESOTA",
-            "hcosod": "HCOSOD",
-            "acosod": "ACOSOD",
-            "homewin": "HomeWin%",
-            "drawwin": "Draw%",
-            "awaywin": "AwayWin%",
-            "score": "Score",
-            "value": "Value",
-        }
-    )
+    df = df.rename(columns={
+        "eventid": "EventID",
+        "hometeam": "HomeTeam",
+        "awayteam": "AwayTeam",
+        "league": "League",
+        "date": "Date",
+        "kickoff": "Kickoff",
+        "home": "Home",
+        "draw": "Draw",
+        "away": "Away",
+        "comopp": "ComOpp",
+        "sodd": "SODD",
+        "xgh": "XGH",
+        "xga": "XGA",
+        "esoth": "ESOTH",
+        "esota": "ESOTA",
+        "hcosod": "HCOSOD",
+        "acosod": "ACOSOD",
+        "homewin": "HomeWin%",
+        "drawwin": "Draw%",
+        "awaywin": "AwayWin%",
+        "score": "Score",
+        "value": "Value",
+    })
 
     df["KickoffDT"] = pd.to_datetime(
         df["Date"].astype(str) + " " + df["Kickoff"].astype(str),
@@ -192,8 +208,112 @@ def load_fixtures() -> pd.DataFrame:
 
     return df
 
+
 # ============================================================
-# GLOBAL FILTERS (ALWAYS APPLIED)
+# LOAD STANDINGS FIELDS
+# ============================================================
+
+@st.cache_data(ttl=60)
+def load_team_standing_fields() -> pd.DataFrame:
+    sql = text("""
+        SELECT
+            "League",
+            "TeamName",
+            "StandingPosition",
+            "StandingPPG",
+            "StandingGames"
+        FROM list_of_teams
+        WHERE
+            "StandingGames" > 0
+            AND "StandingPosition" > 0
+            AND "StandingPPG" IS NOT NULL
+    """)
+
+    try:
+        teams = pd.read_sql(sql, ENGINE)
+    except Exception:
+        return pd.DataFrame()
+
+    if teams.empty:
+        return teams
+
+    teams["League"] = teams["League"].fillna("").astype(str).str.strip()
+    teams["TeamName"] = teams["TeamName"].fillna("").astype(str).str.strip()
+
+    for col in ["StandingPosition", "StandingPPG", "StandingGames"]:
+        teams[col] = pd.to_numeric(teams[col], errors="coerce")
+
+    teams = teams.dropna(subset=[
+        "League",
+        "TeamName",
+        "StandingPosition",
+        "StandingPPG",
+        "StandingGames",
+    ])
+
+    return teams
+
+
+def add_standing_fields(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    for col in ["Home St.Pos", "Away St.Pos", "Home St.PPG", "Away St.PPG", "Home St.Games", "Away St.Games"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    teams = load_team_standing_fields()
+
+    if teams.empty:
+        return df
+
+    df["League"] = df["League"].fillna("").astype(str).str.strip()
+    df["HomeTeam"] = df["HomeTeam"].fillna("").astype(str).str.strip()
+    df["AwayTeam"] = df["AwayTeam"].fillna("").astype(str).str.strip()
+
+    home_lookup = teams.rename(columns={
+        "TeamName": "HomeTeam",
+        "StandingPosition": "Home St.Pos",
+        "StandingPPG": "Home St.PPG",
+        "StandingGames": "Home St.Games",
+    })
+
+    df = df.drop(columns=["Home St.Pos", "Home St.PPG", "Home St.Games"], errors="ignore")
+
+    df = df.merge(
+        home_lookup[["League", "HomeTeam", "Home St.Pos", "Home St.PPG", "Home St.Games"]],
+        on=["League", "HomeTeam"],
+        how="left",
+    )
+
+    away_lookup = teams.rename(columns={
+        "TeamName": "AwayTeam",
+        "StandingPosition": "Away St.Pos",
+        "StandingPPG": "Away St.PPG",
+        "StandingGames": "Away St.Games",
+    })
+
+    df = df.drop(columns=["Away St.Pos", "Away St.PPG", "Away St.Games"], errors="ignore")
+
+    df = df.merge(
+        away_lookup[["League", "AwayTeam", "Away St.Pos", "Away St.PPG", "Away St.Games"]],
+        on=["League", "AwayTeam"],
+        how="left",
+    )
+
+    for col in ["Home St.Pos", "Away St.Pos", "Home St.PPG", "Away St.PPG", "Home St.Games", "Away St.Games"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["Home St.PPG"] = df["Home St.PPG"].round(2)
+    df["Away St.PPG"] = df["Away St.PPG"].round(2)
+
+    return df
+
+
+# ============================================================
+# GLOBAL FILTERS
 # ============================================================
 
 def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -206,6 +326,7 @@ def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     for c in ["Home", "Draw", "Away"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df = df.dropna(subset=["Home", "Draw", "Away"])
     df = df[(df["Home"] > 0) & (df["Draw"] > 0) & (df["Away"] > 0)]
 
@@ -214,12 +335,14 @@ def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     return df.sort_values("KickoffDT")
 
+
 # ============================================================
 # FILTERS
 # ============================================================
 
 def filter_all(df: pd.DataFrame) -> pd.DataFrame:
     return df
+
 
 def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     S0 = 7.0
@@ -236,6 +359,7 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     required = ["SODD", "Home", "Away"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df = df.dropna(subset=required)
     if df.empty:
         return df
@@ -247,20 +371,21 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
 
     adv_home = df["SODD"] > 0
     adv_away = df["SODD"] < 0
+
     df = df[adv_home | adv_away].copy()
     if df.empty:
         return df
+
+    adv_home = df["SODD"] > 0
+    adv_away = df["SODD"] < 0
 
     adv_odds = pd.Series(index=df.index, dtype="float64")
     adv_odds.loc[adv_home] = df.loc[adv_home, "Home"]
     adv_odds.loc[adv_away] = df.loc[adv_away, "Away"]
 
     s_abs = df["SODD"].abs()
-    if S1 > S0:
-        required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
-    else:
-        required_odds = pd.Series(ODDS1, index=df.index)
 
+    required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
     required_odds = required_odds.clip(lower=ODDS1)
 
     df = df[adv_odds >= required_odds].copy()
@@ -279,6 +404,7 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     S0 = 3.0
     S1 = 7.0
@@ -294,6 +420,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     required = ["SODD", "Home", "Away", "HCOSOD", "ACOSOD"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df = df.dropna(subset=required)
     if df.empty:
         return df
@@ -305,9 +432,13 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
 
     adv_home = df["SODD"] > 0
     adv_away = df["SODD"] < 0
+
     df = df[adv_home | adv_away].copy()
     if df.empty:
         return df
+
+    adv_home = df["SODD"] > 0
+    adv_away = df["SODD"] < 0
 
     cosod_adv = pd.Series(index=df.index, dtype="float64")
     cosod_weak = pd.Series(index=df.index, dtype="float64")
@@ -321,15 +452,16 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
+    adv_home = df["SODD"] > 0
+    adv_away = df["SODD"] < 0
+
     adv_odds = pd.Series(index=df.index, dtype="float64")
     adv_odds.loc[adv_home] = df.loc[adv_home, "Home"]
     adv_odds.loc[adv_away] = df.loc[adv_away, "Away"]
 
     s_abs = df["SODD"].abs()
-    if S1 > S0:
-        required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
-    else:
-        required_odds = pd.Series(ODDS1, index=df.index)
+
+    required_odds = ODDS0 + (ODDS1 - ODDS0) * (s_abs - S0) / (S1 - S0)
     required_odds = required_odds.clip(lower=ODDS1)
 
     df = df[adv_odds >= required_odds].copy()
@@ -350,6 +482,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -357,7 +490,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     w_esot = 1.0
     w_xg = 0.8
 
-    D0 = 3
+    D0 = 3.0
     D1 = 5.0
     ODDS0 = 2.40
     ODDS1 = 1.40
@@ -368,12 +501,14 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     required = ["XGH", "XGA", "ESOTH", "ESOTA", "Home", "Away"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+
     df = df.dropna(subset=required)
     if df.empty:
         return df
 
     esot_gap = df["ESOTH"] - df["ESOTA"]
     xg_gap = df["XGH"] - df["XGA"]
+
     D = (w_esot * esot_gap) + (w_xg * xg_gap)
     D_abs = D.abs()
 
@@ -388,14 +523,12 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
     adv_home = D > 0
     adv_away = D < 0
-    df = df[adv_home | adv_away].copy()
-    if df.empty:
-        return df
 
     confirm = (
         (adv_home & (esot_gap > 0) & (xg_gap > 0)) |
         (adv_away & (esot_gap < 0) & (xg_gap < 0))
     )
+
     df = df[confirm].copy()
     if df.empty:
         return df
@@ -404,6 +537,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     xg_gap = df["XGH"] - df["XGA"]
     D = (w_esot * esot_gap) + (w_xg * xg_gap)
     D_abs = D.abs()
+
     adv_home = D > 0
     adv_away = D < 0
 
@@ -411,10 +545,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     adv_odds.loc[adv_home] = df.loc[adv_home, "Home"]
     adv_odds.loc[adv_away] = df.loc[adv_away, "Away"]
 
-    if D1 > D0:
-        required_odds = ODDS0 + (ODDS1 - ODDS0) * (D_abs - D0) / (D1 - D0)
-    else:
-        required_odds = pd.Series(ODDS1, index=df.index)
+    required_odds = ODDS0 + (ODDS1 - ODDS0) * (D_abs - D0) / (D1 - D0)
     required_odds = required_odds.clip(lower=ODDS1)
 
     df = df[adv_odds >= required_odds].copy()
@@ -422,6 +553,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     implied_prob = 1.0 / adv_odds
+
     df = df[implied_prob <= PMAX_CAP].copy()
     if df.empty:
         return df
@@ -436,6 +568,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+
 def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -449,9 +582,10 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "Draw%"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=required)
 
+    df = df.dropna(subset=required)
     df = df[(df["HomeWin%"] > 0) & (df["AwayWin%"] > 0)]
+
     if df.empty:
         return df
 
@@ -477,6 +611,7 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
         (home_abs_edge >= MIN_ABS_EDGE) &
         (home_rel_edge >= MIN_REL_EDGE)
     )
+
     away_value = (
         (df["Away"] >= MIN_ODDS) &
         (away_abs_edge >= MIN_ABS_EDGE) &
@@ -497,6 +632,7 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     df["Away_RelEdge"] = away_rel_edge
 
     return df
+
 
 def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -525,6 +661,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     h2h = pd.read_sql(sql, ENGINE, params={"cutoff_date": cutoff_date})
+
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -537,9 +674,12 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         "HomeShotsOn", "AwayShotsOn",
         "HomeDangerousAttacks", "AwayDangerousAttacks",
     ]
+
     for c in stat_cols:
         h2h[c] = pd.to_numeric(h2h[c], errors="coerce")
+
     h2h = h2h.dropna(subset=stat_cols)
+
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -552,6 +692,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         (total_sot >= total_goals) &
         (total_shots >= 6)
     ].copy()
+
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -560,7 +701,10 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         b = "" if pd.isna(b) else str(b).strip()
         return "||".join(sorted([a, b]))
 
-    h2h["PairKey"] = h2h.apply(lambda r: make_pair_key(r["HomeTeam"], r["AwayTeam"]), axis=1)
+    h2h["PairKey"] = h2h.apply(
+        lambda r: make_pair_key(r["HomeTeam"], r["AwayTeam"]),
+        axis=1,
+    )
 
     h2h_latest = (
         h2h.sort_values("Date", ascending=False)
@@ -569,7 +713,10 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df = df.copy()
-    df["PairKey"] = df.apply(lambda r: make_pair_key(r["HomeTeam"], r["AwayTeam"]), axis=1)
+    df["PairKey"] = df.apply(
+        lambda r: make_pair_key(r["HomeTeam"], r["AwayTeam"]),
+        axis=1,
+    )
 
     df = df.merge(
         h2h_latest[[
@@ -577,7 +724,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
             "HomeTeam", "AwayTeam",
             "HomeShotsOn", "AwayShotsOn",
             "HomeDangerousAttacks", "AwayDangerousAttacks",
-            "Date"
+            "Date",
         ]].rename(columns={
             "HomeTeam": "H2H_HomeTeam",
             "AwayTeam": "H2H_AwayTeam",
@@ -598,6 +745,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df["Home"] > df["Away"], "UnderdogSide"] = "Home"
     df.loc[df["Away"] > df["Home"], "UnderdogSide"] = "Away"
     df = df[df["UnderdogSide"].notna()].copy()
+
     if df.empty:
         return df
 
@@ -620,18 +768,13 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
 
         return (ud_sot > opp_sot) and (ud_dang > opp_dang)
 
-    df = df[df.apply(underdog_edge_row, axis=1)].copy()
-    return df
+    return df[df.apply(underdog_edge_row, axis=1)].copy()
+
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    League Table filter:
     Shows fixtures where the higher-positioned team also has higher odds.
-
-    Higher position = lower StandingPosition number.
-    Example:
-    Home position 2 vs Away position 8
-    AND Home odds > Away odds
+    Higher position = lower standing position number.
     """
 
     if df.empty:
@@ -639,86 +782,16 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    sql = text("""
-        SELECT
-            "League",
-            "TeamName",
-            "StandingPosition",
-            "StandingPPG",
-            "StandingGames"
-        FROM list_of_teams
-        WHERE
-            "StandingGames" > 0
-            AND "StandingPosition" > 0
-            AND "StandingPPG" IS NOT NULL
-    """)
-
-    try:
-        teams = pd.read_sql(sql, ENGINE)
-    except Exception as e:
-        st.warning("League table filter unavailable.")
-        st.code(str(e))
-        return df.iloc[0:0]
-
-    if teams.empty:
-        return df.iloc[0:0]
-
-    teams["League"] = teams["League"].fillna("").astype(str).str.strip()
-    teams["TeamName"] = teams["TeamName"].fillna("").astype(str).str.strip()
-
-    for col in ["StandingPosition", "StandingPPG", "StandingGames"]:
-        teams[col] = pd.to_numeric(teams[col], errors="coerce")
-
-    teams = teams.dropna(subset=[
-        "League",
-        "TeamName",
-        "StandingPosition",
-        "StandingPPG",
-        "StandingGames",
-    ])
-
-    df["League"] = df["League"].fillna("").astype(str).str.strip()
-    df["HomeTeam"] = df["HomeTeam"].fillna("").astype(str).str.strip()
-    df["AwayTeam"] = df["AwayTeam"].fillna("").astype(str).str.strip()
-
-    home_lookup = teams.rename(columns={
-        "TeamName": "HomeTeam",
-        "StandingPosition": "Home St.Pos",
-        "StandingPPG": "Home St.PPG",
-        "StandingGames": "Home St.Games",
-    })
-
-    df = df.merge(
-        home_lookup[["League", "HomeTeam", "Home St.Pos", "Home St.PPG", "Home St.Games"]],
-        on=["League", "HomeTeam"],
-        how="left",
-    )
-
-    away_lookup = teams.rename(columns={
-        "TeamName": "AwayTeam",
-        "StandingPosition": "Away St.Pos",
-        "StandingPPG": "Away St.PPG",
-        "StandingGames": "Away St.Games",
-    })
-
-    df = df.merge(
-        away_lookup[["League", "AwayTeam", "Away St.Pos", "Away St.PPG", "Away St.Games"]],
-        on=["League", "AwayTeam"],
-        how="left",
-    )
-
     required = [
-        "Home",
-        "Away",
-        "Home St.Pos",
-        "Away St.Pos",
-        "Home St.PPG",
-        "Away St.PPG",
-        "Home St.Games",
-        "Away St.Games",
+        "Home", "Away",
+        "Home St.Pos", "Away St.Pos",
+        "Home St.PPG", "Away St.PPG",
+        "Home St.Games", "Away St.Games",
     ]
 
     for col in required:
+        if col not in df.columns:
+            df[col] = pd.NA
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=required)
@@ -746,193 +819,33 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
         (df["Away"] > df["Home"])
     )
 
-    df = df[home_edge | away_edge].copy()
+    return df[home_edge | away_edge].copy()
 
-    if df.empty:
-        return df
-
-    df["Home St.PPG"] = df["Home St.PPG"].round(2)
-    df["Away St.PPG"] = df["Away St.PPG"].round(2)
-
-    return df
-
-    # ========================================================
-    # LOAD TEAM STANDINGS
-    # ========================================================
-
-    sql = text("""
-        SELECT
-            "League",
-            "TeamName",
-            "StandingPPG",
-            "StandingGames"
-        FROM list_of_teams
-        WHERE
-            "StandingGames" > 0
-            AND "StandingPPG" IS NOT NULL
-    """)
-
-    teams = pd.read_sql(sql, ENGINE)
-
-    if teams.empty:
-        return df.iloc[0:0]
-
-    # ========================================================
-    # CLEAN TYPES
-    # ========================================================
-
-    for col in ["StandingPPG", "StandingGames"]:
-        teams[col] = pd.to_numeric(teams[col], errors="coerce")
-
-    teams["League"] = teams["League"].astype(str).str.strip()
-    teams["TeamName"] = teams["TeamName"].astype(str).str.strip()
-
-    df["League"] = df["League"].astype(str).str.strip()
-    df["HomeTeam"] = df["HomeTeam"].astype(str).str.strip()
-    df["AwayTeam"] = df["AwayTeam"].astype(str).str.strip()
-
-    # ========================================================
-    # HOME JOIN
-    # ========================================================
-
-    home_lookup = teams.rename(columns={
-        "TeamName": "HomeTeam",
-        "StandingPPG": "HomePPG",
-        "StandingGames": "HomeGP",
-    })
-
-    df = df.merge(
-        home_lookup[
-            ["League", "HomeTeam", "HomePPG", "HomeGP"]
-        ],
-        on=["League", "HomeTeam"],
-        how="left"
-    )
-
-    # ========================================================
-    # AWAY JOIN
-    # ========================================================
-
-    away_lookup = teams.rename(columns={
-        "TeamName": "AwayTeam",
-        "StandingPPG": "AwayPPG",
-        "StandingGames": "AwayGP",
-    })
-
-    df = df.merge(
-        away_lookup[
-            ["League", "AwayTeam", "AwayPPG", "AwayGP"]
-        ],
-        on=["League", "AwayTeam"],
-        how="left"
-    )
-
-    # ========================================================
-    # NUMERIC CLEAN
-    # ========================================================
-
-    numeric_cols = [
-        "Home",
-        "Away",
-        "HomePPG",
-        "AwayPPG",
-        "HomeGP",
-        "AwayGP",
-    ]
-
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=numeric_cols)
-
-    if df.empty:
-        return df
-
-    # ========================================================
-    # MINIMUM GAMES FILTER
-    # ========================================================
-
-    MIN_GAMES = 5
-
-    df = df[
-        (df["HomeGP"] >= MIN_GAMES) &
-        (df["AwayGP"] >= MIN_GAMES)
-    ].copy()
-
-    if df.empty:
-        return df
-
-    # ========================================================
-    # EDGE LOGIC
-    # ========================================================
-
-    PPG_RATIO = 1.20
-    ODDS_RATIO = 1.10
-
-    home_edge = (
-        (df["HomePPG"] >= (df["AwayPPG"] * PPG_RATIO)) &
-        (df["Home"] >= (df["Away"] * ODDS_RATIO))
-    )
-
-    away_edge = (
-        (df["AwayPPG"] >= (df["HomePPG"] * PPG_RATIO)) &
-        (df["Away"] >= (df["Home"] * ODDS_RATIO))
-    )
-
-    df = df[home_edge | away_edge].copy()
-
-    if df.empty:
-        return df
-
-    # ========================================================
-    # OUTPUT FIELDS
-    # ========================================================
-
-    df["LeagueTableSide"] = None
-
-    df.loc[home_edge, "LeagueTableSide"] = "Home"
-    df.loc[away_edge, "LeagueTableSide"] = "Away"
-
-    df["PPGGap"] = (
-        df["HomePPG"] - df["AwayPPG"]
-    ).round(2)
-
-    df["PPGRatio"] = (
-        df[["HomePPG", "AwayPPG"]].max(axis=1)
-        /
-        df[["HomePPG", "AwayPPG"]].min(axis=1)
-    ).round(2)
-
-    return df
 
 # ============================================================
 # FILTER REGISTRY
 # ============================================================
 
 FILTERS = [
-    ("ALL", "All Fixtures", filter_all),
+    ("ALL", "All", filter_all),
     ("SODD", "SODD", filter_sodd),
-    ("SCOSOD", "SODD + COSOD", filter_sodd_cosod),
-    ("XG", "xG / xSOT", filter_xg_xsot),
+    ("SCOSOD", "SODD+COSOD", filter_sodd_cosod),
+    ("XG", "xG/xSOT", filter_xg_xsot),
     ("XWIN", "XWin%", filter_xwin_percent),
-    ("H2H", "Head-to-Head", filter_head_to_head),
-    ("LEAGUE", "League Table", filter_league_table),
+    ("H2H", "H2H", filter_head_to_head),
+    ("LEAGUE", "League", filter_league_table),
 ]
 
 # ============================================================
-# HEADER
+# HEADER + BUTTONS
 # ============================================================
 
 st.markdown("## Pre-Game Finder")
 
-# ============================================================
-# BUTTON BAR
-# ============================================================
-
 if "active_filter" not in st.session_state:
     st.session_state.active_filter = "ALL"
 
-cols = st.columns([1.2, 1, 1.4, 1.2, 1.1, 1.4, 1.4, 3.3])
+cols = st.columns([1, 1, 1.35, 1, 1, 1, 1])
 
 for i, (key, label, _) in enumerate(FILTERS):
     with cols[i]:
@@ -945,30 +858,40 @@ for i, (key, label, _) in enumerate(FILTERS):
 
 df = apply_global_filters(load_fixtures())
 
+# Adds these fields to every fixture before filters:
+# Home St.Pos, Away St.Pos, Home St.PPG, Away St.PPG
+df = add_standing_fields(df)
+
 active_key = st.session_state.active_filter
 active_fn = {k: fn for (k, _, fn) in FILTERS}[active_key]
 df = active_fn(df)
 
 if not df.empty:
-    df["Date"] = df["KickoffDT"].dt.strftime("%d/%m/%Y")
+    df["Date"] = df["KickoffDT"].dt.strftime("%d/%m")
     df["Kickoff"] = df["KickoffDT"].dt.strftime("%H:%M")
 
+# ============================================================
+# DISPLAY
+# ============================================================
+
 DISPLAY_COLS = [
-    "EventID", "HomeTeam", "AwayTeam", "League",
+    "EventID",
+    "HomeTeam", "AwayTeam", "League",
     "Date", "Kickoff",
     "Home", "Draw", "Away",
     "Home St.Pos", "Away St.Pos",
     "Home St.PPG", "Away St.PPG",
     "ComOpp",
-    "SODD", "HCOSOD", "ACOSOD", "XGH", "XGA", "ESOTH",
-    "ESOTA", "HomeWin%", "Draw%", "AwayWin%", "Score",
+    "SODD", "HCOSOD", "ACOSOD",
+    "XGH", "XGA", "ESOTH", "ESOTA",
+    "HomeWin%", "Draw%", "AwayWin%",
+    "Score",
 ]
 
-df_view = df[DISPLAY_COLS].copy() if not df.empty else pd.DataFrame(columns=DISPLAY_COLS)
-
-# ============================================================
-# CLEAN DISPLAY TYPES
-# ============================================================
+if not df.empty:
+    df_view = df.reindex(columns=DISPLAY_COLS).copy()
+else:
+    df_view = pd.DataFrame(columns=DISPLAY_COLS)
 
 numeric_cols = [
     "Home", "Draw", "Away",
@@ -978,6 +901,7 @@ numeric_cols = [
     "XGH", "XGA", "ESOTH", "ESOTA",
     "HomeWin%", "Draw%", "AwayWin%",
 ]
+
 for col in numeric_cols:
     if col in df_view.columns:
         df_view[col] = pd.to_numeric(df_view[col], errors="coerce")
@@ -986,31 +910,31 @@ for col in df_view.columns:
     if col not in numeric_cols:
         df_view[col] = df_view[col].fillna("").astype(str)
 
-st.markdown(f"**Fixtures ({len(df_view)})**")
+st.markdown(f"**{active_key} Fixtures ({len(df_view)})**")
 
 # ============================================================
-# TABLE
+# MOBILE-FRIENDLY TABLE
 # ============================================================
 
 st.dataframe(
     df_view,
     use_container_width=True,
-    height=700,
+    height=620,
+    hide_index=True,
 )
 
 st.caption(
-    "Use the table toolbar to search, sort, and download if available. "
-    "Pre-Game Finder - Supabase-backed - internal read-only tool."
+    "Pre-Game Finder - Supabase-backed - public read-only dashboard."
 )
 
 # ============================================================
-# EXPORT CURRENT VIEW TO CSV
+# EXPORT
 # ============================================================
 
 csv_bytes = df_view.to_csv(index=False).encode("utf-8")
 
 st.download_button(
-    label="Export table to CSV",
+    label="Export CSV",
     data=csv_bytes,
     file_name=f"pre_game_finder_{active_key.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
     mime="text/csv",
