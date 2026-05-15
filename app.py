@@ -913,13 +913,12 @@ DISPLAY_COLS = [
     "HomeTeam", "AwayTeam", "League",
     "Date", "Kickoff",
     "Home", "Draw", "Away",
-    "Home St.Pos", "Away St.Pos",
-    "Home St.PPG", "Away St.PPG",
     "ComOpp",
     "SODD", "HCOSOD", "ACOSOD",
+    "Home St.Pos", "Away St.Pos",
+    "Home St.PPG", "Away St.PPG",
     "XGH", "XGA", "ESOTH", "ESOTA",
     "HomeWin%", "Draw%", "AwayWin%",
-    "Score",
 ]
 
 if not df.empty:
