@@ -774,10 +774,13 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     """
     League Table filter:
-    Shows fixtures where the better-positioned team has:
+    Shows fixtures where the valued side has:
     - at least 2 league places advantage
-    - at least 1.1x the opponent's PPG
+    - at least 1.10x the opponent's PPG
     - higher odds than the opponent
+    - SODD in their favour:
+        Home = positive SODD
+        Away = negative SODD
     """
 
     if df.empty:
@@ -786,7 +789,7 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     required = [
-        "Home", "Away",
+        "Home", "Away", "SODD",
         "Home St.Pos", "Away St.Pos",
         "Home St.PPG", "Away St.PPG",
         "Home St.Games", "Away St.Games",
@@ -819,13 +822,15 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     home_edge = (
         ((df["Away St.Pos"] - df["Home St.Pos"]) >= MIN_POSITION_GAP) &
         (df["Home St.PPG"] >= df["Away St.PPG"] * MIN_PPG_RATIO) &
-        (df["Home"] > df["Away"])
+        (df["Home"] > df["Away"]) &
+        (df["SODD"] > 0)
     )
 
     away_edge = (
         ((df["Home St.Pos"] - df["Away St.Pos"]) >= MIN_POSITION_GAP) &
         (df["Away St.PPG"] >= df["Home St.PPG"] * MIN_PPG_RATIO) &
-        (df["Away"] > df["Home"])
+        (df["Away"] > df["Home"]) &
+        (df["SODD"] < 0)
     )
 
     df = df[home_edge | away_edge].copy()
