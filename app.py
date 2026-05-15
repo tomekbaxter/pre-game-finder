@@ -773,8 +773,11 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Shows fixtures where the higher-positioned team also has higher odds.
-    Higher position = lower standing position number.
+    League Table filter:
+    Shows fixtures where the better-positioned team has:
+    - at least 2 league places advantage
+    - at least 1.1x the opponent's PPG
+    - higher odds than the opponent
     """
 
     if df.empty:
@@ -800,27 +803,53 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     MIN_GAMES = 5
+    MIN_POSITION_GAP = 2
+    MIN_PPG_RATIO = 1.10
 
     df = df[
         (df["Home St.Games"] >= MIN_GAMES) &
-        (df["Away St.Games"] >= MIN_GAMES)
+        (df["Away St.Games"] >= MIN_GAMES) &
+        (df["Home St.PPG"] > 0) &
+        (df["Away St.PPG"] > 0)
     ].copy()
 
     if df.empty:
         return df
 
     home_edge = (
-        (df["Home St.Pos"] < df["Away St.Pos"]) &
+        ((df["Away St.Pos"] - df["Home St.Pos"]) >= MIN_POSITION_GAP) &
+        (df["Home St.PPG"] >= df["Away St.PPG"] * MIN_PPG_RATIO) &
         (df["Home"] > df["Away"])
     )
 
     away_edge = (
-        (df["Away St.Pos"] < df["Home St.Pos"]) &
+        ((df["Home St.Pos"] - df["Away St.Pos"]) >= MIN_POSITION_GAP) &
+        (df["Away St.PPG"] >= df["Home St.PPG"] * MIN_PPG_RATIO) &
         (df["Away"] > df["Home"])
     )
 
-    return df[home_edge | away_edge].copy()
+    df = df[home_edge | away_edge].copy()
 
+    if df.empty:
+        return df
+
+    df["LeagueTableSide"] = ""
+    df.loc[home_edge, "LeagueTableSide"] = "Home"
+    df.loc[away_edge, "LeagueTableSide"] = "Away"
+
+    df["PositionGap"] = (
+        df[["Home St.Pos", "Away St.Pos"]].max(axis=1)
+        - df[["Home St.Pos", "Away St.Pos"]].min(axis=1)
+    )
+
+    df["PPGGap"] = (df["Home St.PPG"] - df["Away St.PPG"]).round(2)
+
+    df["PPGRatio"] = (
+        df[["Home St.PPG", "Away St.PPG"]].max(axis=1)
+        / df[["Home St.PPG", "Away St.PPG"]].min(axis=1)
+    ).round(2)
+
+    return df
 
 # ============================================================
 # FILTER REGISTRY
