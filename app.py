@@ -640,7 +640,7 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
+ddef filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
@@ -658,9 +658,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
             "HomeShots",
             "AwayShots",
             "HomeShotsOn",
-            "AwayShotsOn",
-            "HomeDangerousAttacks",
-            "AwayDangerousAttacks"
+            "AwayShotsOn"
         FROM matchstats
         WHERE "Date" >= :cutoff_date
         """
@@ -678,7 +676,6 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
         "HomeGoals", "AwayGoals",
         "HomeShots", "AwayShots",
         "HomeShotsOn", "AwayShotsOn",
-        "HomeDangerousAttacks", "AwayDangerousAttacks",
     ]
 
     for c in stat_cols:
@@ -719,6 +716,7 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df = df.copy()
+
     df["PairKey"] = df.apply(
         lambda r: make_pair_key(r["HomeTeam"], r["AwayTeam"]),
         axis=1,
@@ -727,17 +725,16 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     df = df.merge(
         h2h_latest[[
             "PairKey",
-            "HomeTeam", "AwayTeam",
-            "HomeShotsOn", "AwayShotsOn",
-            "HomeDangerousAttacks", "AwayDangerousAttacks",
+            "HomeTeam",
+            "AwayTeam",
+            "HomeShotsOn",
+            "AwayShotsOn",
             "Date",
         ]].rename(columns={
             "HomeTeam": "H2H_HomeTeam",
             "AwayTeam": "H2H_AwayTeam",
             "HomeShotsOn": "H2H_HomeShotsOn",
             "AwayShotsOn": "H2H_AwayShotsOn",
-            "HomeDangerousAttacks": "H2H_HomeDangerousAttacks",
-            "AwayDangerousAttacks": "H2H_AwayDangerousAttacks",
             "Date": "H2H_Date",
         }),
         on="PairKey",
@@ -747,35 +744,39 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    df["UnderdogSide"] = None
-    df.loc[df["Home"] > df["Away"], "UnderdogSide"] = "Home"
-    df.loc[df["Away"] > df["Home"], "UnderdogSide"] = "Away"
-    df = df[df["UnderdogSide"].notna()].copy()
+    df["HigherOddsSide"] = None
+    df.loc[df["Home"] > df["Away"], "HigherOddsSide"] = "Home"
+    df.loc[df["Away"] > df["Home"], "HigherOddsSide"] = "Away"
+
+    df = df[df["HigherOddsSide"].notna()].copy()
 
     if df.empty:
         return df
 
-    def underdog_edge_row(row) -> bool:
-        ud_team = row["HomeTeam"] if row["UnderdogSide"] == "Home" else row["AwayTeam"]
-        opp_team = row["AwayTeam"] if row["UnderdogSide"] == "Home" else row["HomeTeam"]
+    def higher_odds_team_had_2x_sot(row) -> bool:
+        high_team = row["HomeTeam"] if row["HigherOddsSide"] == "Home" else row["AwayTeam"]
+        low_team = row["AwayTeam"] if row["HigherOddsSide"] == "Home" else row["HomeTeam"]
 
-        if row["H2H_HomeTeam"] == ud_team and row["H2H_AwayTeam"] == opp_team:
-            ud_sot = row["H2H_HomeShotsOn"]
-            opp_sot = row["H2H_AwayShotsOn"]
-            ud_dang = row["H2H_HomeDangerousAttacks"]
-            opp_dang = row["H2H_AwayDangerousAttacks"]
-        elif row["H2H_AwayTeam"] == ud_team and row["H2H_HomeTeam"] == opp_team:
-            ud_sot = row["H2H_AwayShotsOn"]
-            opp_sot = row["H2H_HomeShotsOn"]
-            ud_dang = row["H2H_AwayDangerousAttacks"]
-            opp_dang = row["H2H_HomeDangerousAttacks"]
+        if row["H2H_HomeTeam"] == high_team and row["H2H_AwayTeam"] == low_team:
+            high_sot = row["H2H_HomeShotsOn"]
+            low_sot = row["H2H_AwayShotsOn"]
+        elif row["H2H_AwayTeam"] == high_team and row["H2H_HomeTeam"] == low_team:
+            high_sot = row["H2H_AwayShotsOn"]
+            low_sot = row["H2H_HomeShotsOn"]
         else:
             return False
 
-        return (ud_sot > opp_sot) and (ud_dang > opp_dang)
+        return high_sot > (2 * low_sot)
 
-    return df[df.apply(underdog_edge_row, axis=1)].copy()
+    df = df[df.apply(higher_odds_team_had_2x_sot, axis=1)].copy()
 
+    if df.empty:
+        return df
+
+    df["H2H_HigherOddsSide"] = df["HigherOddsSide"]
+    df["H2H_Date"] = pd.to_datetime(df["H2H_Date"], errors="coerce").dt.strftime("%d/%m/%Y")
+
+    return df
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     """
