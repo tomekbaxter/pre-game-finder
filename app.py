@@ -169,8 +169,8 @@ def load_fixtures() -> pd.DataFrame:
             awaywin,
             score,
             value,
-            XConvH,
-            XConvA
+            "XConvH",
+            "XConvA"
         FROM fixtures
         WHERE date >= CURRENT_DATE
         """
@@ -203,6 +203,8 @@ def load_fixtures() -> pd.DataFrame:
         "value": "Value",
         "XConvH": "XConvH",
         "XConvA": "XConvA",
+        "xconvh": "XConvH",
+        "xconva": "XConvA",
     })
 
     df["KickoffDT"] = pd.to_datetime(
@@ -922,6 +924,7 @@ DISPLAY_COLS = [
     "Home St.Pos", "Away St.Pos",
     "Home St.PPG", "Away St.PPG",
     "XGH", "XGA", "ESOTH", "ESOTA",
+    "XConvH", "XConvA",
     "HomeWin%", "Draw%", "AwayWin%",
 ]
 
@@ -936,6 +939,7 @@ numeric_cols = [
     "Home St.PPG", "Away St.PPG",
     "ComOpp", "SODD", "HCOSOD", "ACOSOD",
     "XGH", "XGA", "ESOTH", "ESOTA",
+    "XConvH", "XConvA",
     "HomeWin%", "Draw%", "AwayWin%",
 ]
 
