@@ -168,7 +168,9 @@ def load_fixtures() -> pd.DataFrame:
             drawwin,
             awaywin,
             score,
-            value
+            value,
+            XConvH,
+            XConvA
         FROM fixtures
         WHERE date >= CURRENT_DATE
         """
@@ -199,6 +201,8 @@ def load_fixtures() -> pd.DataFrame:
         "awaywin": "AwayWin%",
         "score": "Score",
         "value": "Value",
+        "XConvH": "XConvH",
+        "XConvA": "XConvA",
     })
 
     df["KickoffDT"] = pd.to_datetime(
