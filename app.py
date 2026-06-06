@@ -640,7 +640,7 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-ddef filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
+def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
