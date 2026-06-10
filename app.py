@@ -200,8 +200,8 @@ def load_fixtures() -> pd.DataFrame:
             awaywin,
             score,
             value,
-            "XConvH",
-            "XConvA"
+            "xconvh",
+            "xconva"
         FROM fixtures
         WHERE date >= CURRENT_DATE
         """
@@ -232,8 +232,6 @@ def load_fixtures() -> pd.DataFrame:
         "awaywin": "AwayWin%",
         "score": "Score",
         "value": "Value",
-        "XConvH": "XConvH",
-        "XConvA": "XConvA",
         "xconvh": "XConvH",
         "xconva": "XConvA",
     })
