@@ -1001,19 +1001,6 @@ st.caption(
 )
 
 # ============================================================
-# EXPORT
-# ============================================================
-
-csv_bytes = df_view.to_csv(index=False).encode("utf-8")
-
-st.download_button(
-    label="Export CSV",
-    data=csv_bytes,
-    file_name=f"pre_game_finder_{active_key.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
-)
-
-# ============================================================
 # LAST REFRESH FOOTER
 # ============================================================
 
@@ -1033,4 +1020,18 @@ st.markdown(
     </div>
     """,
     unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+csv_bytes = df_view.to_csv(index=False).encode("utf-8")
+
+st.download_button(
+    label="Export CSV",
+    data=csv_bytes,
+    file_name=f"pre_game_finder_{active_key.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
 )
