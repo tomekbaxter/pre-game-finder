@@ -139,6 +139,37 @@ def _db_healthcheck() -> None:
 _db_healthcheck()
 
 # ============================================================
+# FIXTURES LAST REFRESH TIME
+# ============================================================
+
+@st.cache_data(ttl=60)
+def get_fixtures_last_refresh_time() -> str:
+    sql = text("""
+        SELECT MAX(last_synced_at) AS last_synced_at
+        FROM fixtures
+    """)
+
+    try:
+        df = pd.read_sql(sql, ENGINE)
+    except Exception:
+        return "Unavailable"
+
+    if df.empty or pd.isna(df.loc[0, "last_synced_at"]):
+        return "Unknown"
+
+    ts = pd.to_datetime(df.loc[0, "last_synced_at"], errors="coerce")
+
+    if pd.isna(ts):
+        return "Unknown"
+
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+
+    ts = ts.tz_convert(TZ)
+
+    return ts.strftime("%d/%m/%Y %H:%M:%S")
+
+# ============================================================
 # LOAD FIXTURES
 # ============================================================
 
@@ -980,4 +1011,26 @@ st.download_button(
     data=csv_bytes,
     file_name=f"pre_game_finder_{active_key.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
     mime="text/csv",
+)
+
+# ============================================================
+# LAST REFRESH FOOTER
+# ============================================================
+
+last_refresh_time = get_fixtures_last_refresh_time()
+
+st.markdown(
+    f"""
+    <div style="
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid rgba(255,255,255,0.15);
+        color: #AAAAAA;
+        font-size: 0.82rem;
+        text-align: center;
+    ">
+        Fixtures data last refreshed: <b>{last_refresh_time}</b> London time
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
