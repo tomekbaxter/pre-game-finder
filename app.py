@@ -713,10 +713,16 @@ def render_help(active: str):
                 for t, d in GLOSSARY
             )
             + f'<div style="margin-top:10px;color:{TEXT_3};">'
-              f'<span style="color:{GOOD_HEX};">Green</span> marks a value '
-              f'better than the column baseline, '
-              f'<span style="color:{BAD_HEX};">red</span> worse. '
-              f"Every figure is also readable without colour.</div></div>",
+              f"Signed columns are shaded by size and direction: "
+              f'<span style="color:{GOOD_HEX};">green</span> for large '
+              f'positive values, <span style="color:{BAD_HEX};">red</span> '
+              f"for large negative ones, with zero left uncoloured. On "
+              f"differentials such as SODD and COSOD, positive favours the "
+              f"home side and negative the away side — the shade indicates "
+              f"how pronounced the difference is, not which outcome is "
+              f"preferable. Intensity is set against the spread of that "
+              f"column across every upcoming fixture, so the same value "
+              f"always reads the same shade.</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -768,19 +774,90 @@ DETAIL_COLS = ["ComOpp", "SODD", "HCOSOD", "ACOSOD",
                "XGH", "XGA", "ESOTH", "ESOTA", "XConvH", "XConvA",
                "HomeWin%", "Draw%", "AwayWin%"]
 
-# Columns tinted against a reference.
-#   ("signed", scale)   zero is neutral; scale is a typical magnitude
-#   ("ratio", baseline) tinted by proportional deviation from the baseline
-SCALED = {
-    "Edge":      ("signed", 15.0, True),
-    "SODD":      ("signed", 8.0, True),
-    "COSOD Adv": ("signed", 3.0, True),
-    "COSOD Opp": ("signed", 3.0, False),
-    "ESOT Gap":  ("signed", 3.0, True),
-    "xG Gap":    ("signed", 1.0, True),
-    "Pos Gap":   ("signed", 8.0, True),
-    "PPG Ratio": ("ratio", 1.0, True),
+# Signed fields: zero is neutral, large positive tints green, large negative
+# tints red. The intensity scale for each is derived from the spread of that
+# field across all upcoming fixtures rather than a hardcoded constant, so a
+# given value always reads the same shade no matter which filter is active.
+SIGNED_FIELDS = [
+    "SODD", "COSOD Adv", "COSOD Opp", "ESOT Gap", "xG Gap",
+    "Edge", "Signal", "Pos Gap",
+]
+
+# How to reconstruct each field's distribution from the full fixture set.
+# Several of these columns only exist after a filter runs, so their scale is
+# computed from the underlying inputs instead.
+SCALE_SOURCES = {
+    "SODD": lambda d: d.get("SODD"),
+    "Signal": lambda d: d.get("SODD"),
+    "COSOD Adv": lambda d: _pool(d, ["HCOSOD", "ACOSOD"]),
+    "COSOD Opp": lambda d: _pool(d, ["HCOSOD", "ACOSOD"]),
+    "ESOT Gap": lambda d: _gap(d, "ESOTH", "ESOTA"),
+    "xG Gap": lambda d: _gap(d, "XGH", "XGA"),
+    "Pos Gap": lambda d: _gap(d, "Home St.Pos", "Away St.Pos"),
+    "Edge": lambda d: _edge_spread(d),
 }
+
+DEFAULT_SCALES = {
+    "SODD": 8.0, "Signal": 8.0, "COSOD Adv": 3.0, "COSOD Opp": 3.0,
+    "ESOT Gap": 3.0, "xG Gap": 1.0, "Pos Gap": 8.0, "Edge": 15.0,
+}
+
+
+def _pool(d: pd.DataFrame, cols: list[str]) -> pd.Series | None:
+    present = [c for c in cols if c in d.columns]
+    if not present:
+        return None
+    return pd.concat([pd.to_numeric(d[c], errors="coerce") for c in present],
+                     ignore_index=True)
+
+
+def _gap(d: pd.DataFrame, a: str, b: str) -> pd.Series | None:
+    if a not in d.columns or b not in d.columns:
+        return None
+    return (pd.to_numeric(d[a], errors="coerce")
+            - pd.to_numeric(d[b], errors="coerce"))
+
+
+def _edge_spread(d: pd.DataFrame) -> pd.Series | None:
+    need = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%"]
+    if any(c not in d.columns for c in need):
+        return None
+    o = {c: pd.to_numeric(d[c], errors="coerce") for c in need}
+    overround = 1 / o["Home"] + 1 / o["Draw"] + 1 / o["Away"]
+    home = o["HomeWin%"] - (1 / o["Home"]) / overround * 100
+    away = o["AwayWin%"] - (1 / o["Away"]) / overround * 100
+    return pd.concat([home, away], ignore_index=True)
+
+
+def compute_scales(base: pd.DataFrame) -> dict:
+    """
+    One scale per field, taken as the 90th percentile of absolute values so a
+    handful of outliers can't wash the whole column to full saturation.
+    """
+    scales = {}
+    for field in SIGNED_FIELDS:
+        fallback = DEFAULT_SCALES.get(field, 1.0)
+        source = SCALE_SOURCES.get(field)
+        series = source(base) if (source and not base.empty) else None
+
+        if series is None:
+            scales[field] = fallback
+            continue
+
+        values = pd.to_numeric(series, errors="coerce").abs().dropna()
+        values = values[values > 0]
+        if len(values) < 5:
+            scales[field] = fallback
+            continue
+
+        scale = float(values.quantile(0.90))
+        scales[field] = scale if scale > 0 else fallback
+
+    return scales
+
+
+# Ratio fields are tinted by proportional deviation from a fixed baseline.
+RATIO_FIELDS = {"PPG Ratio": 1.0}
 
 
 def build_view(df: pd.DataFrame, show_detail: bool) -> pd.DataFrame:
@@ -803,25 +880,27 @@ def build_view(df: pd.DataFrame, show_detail: bool) -> pd.DataFrame:
     return df.reindex(columns=cols)
 
 
-def style_view(view: pd.DataFrame):
+def style_view(view: pd.DataFrame, scales: dict):
     numeric = list(view.select_dtypes(include="number").columns)
     styler = view.style
     if numeric:
         styler = styler.format(precision=2, na_rep="—", subset=numeric)
 
-    for col, (mode, param, higher_better) in SCALED.items():
+    for col in SIGNED_FIELDS:
         if col not in view.columns:
             continue
-        if mode == "signed":
-            styler = styler.map(
-                lambda v, s=param, hb=higher_better: signed_colour(v, s, hb),
-                subset=[col],
-            )
-        else:
-            styler = styler.map(
-                lambda v, b=param, hb=higher_better: scale_colour(v, b, hb),
-                subset=[col],
-            )
+        styler = styler.map(
+            lambda v, s=scales.get(col, 1.0): signed_colour(v, s, True),
+            subset=[col],
+        )
+
+    for col, baseline in RATIO_FIELDS.items():
+        if col not in view.columns:
+            continue
+        styler = styler.map(
+            lambda v, b=baseline: scale_colour(v, b, True), subset=[col],
+        )
+
     return styler
 
 
@@ -844,6 +923,7 @@ active = st.radio(
 
 with st.spinner("Loading fixtures…"):
     base = add_standings(apply_global_filters(load_fixtures()))
+    scales = compute_scales(base)
     result = FILTERS[active][0](base)
 
 left, right = st.columns([3, 1])
@@ -868,7 +948,7 @@ if view.empty:
     )
 else:
     st.dataframe(
-        style_view(view),
+        style_view(view, scales),
         use_container_width=True,
         height=min(620, 40 * len(view) + 60),
         hide_index=True,
