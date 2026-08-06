@@ -466,6 +466,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
 def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     W_ESOT, W_XG = 1.0, 0.8
     D0, D1, ODDS0, ODDS1, PMAX = 3.0, 5.0, 2.40, 1.40, 0.60
+    MIN_ABS_SODD = 1.0
     if df.empty:
         return df
 
