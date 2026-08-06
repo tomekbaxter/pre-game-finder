@@ -23,7 +23,7 @@ TEXT_2 = "#93A0B8"
 TEXT_3 = "#5F6E88"
 
 HOME = "#4C8DFF"
-AWAY = "#8FA3BE"
+AWAY = "#B8894A"
 
 # Reserved exclusively for value-vs-baseline scales. Nothing structural
 # uses these, so a red cell always means "worse", never "away team".
@@ -471,7 +471,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-    required = ["XGH", "XGA", "ESOTH", "ESOTA", "Home", "Away"]
+    required = ["XGH", "XGA", "ESOTH", "ESOTA", "Home", "Away", "SODD"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=required)
@@ -485,7 +485,11 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     # Both signals must agree with the dominance direction.
     agree = (((dom > 0) & (esot_gap > 0) & (xg_gap > 0))
              | ((dom < 0) & (esot_gap < 0) & (xg_gap < 0)))
-    keep = (dom.abs() >= D0) & agree
+    # Drop fixtures with effectively no shots-on-target differential against
+    # shared opponents. Magnitude only — direction is not required to match
+    # the xG signal.
+    has_sodd = df["SODD"].abs() >= MIN_ABS_SODD
+    keep = (dom.abs() >= D0) & agree & has_sodd
 
     df = df[keep].copy()
     if df.empty:
@@ -513,11 +517,15 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-    required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "Draw%"]
+    required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "Draw%",
+                "SODD"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=required)
     df = df[(df["HomeWin%"] > 0) & (df["AwayWin%"] > 0)]
+    # Drop fixtures with effectively no shots-on-target differential against
+    # shared opponents. Magnitude only — direction need not match the edge.
+    df = df[df["SODD"].abs() >= MIN_ABS_SODD]
     if df.empty:
         return df
 
@@ -663,10 +671,13 @@ FILTERS = {
     "xG / xSoT": (filter_xg_xsot,
                   "Expected goals and expected shots on target must both "
                   "favour the same side, with a combined dominance score of "
-                  "at least 3."),
+                  "at least 3 and a shots-on-target differential against "
+                  "shared opponents of at least 1 either way."),
     "XWin %": (filter_xwin_percent,
                "Model win probability exceeds the odds-implied probability by "
-               "at least 7 percentage points and 75% in relative terms."),
+               "at least 7 percentage points and 75% in relative terms, with "
+               "a shots-on-target differential against shared opponents of at "
+               "least 1 either way."),
     "H2H": (filter_head_to_head,
             "The higher-priced side had more than twice the shots on target "
             "of its opponent when these two last met, within 90 days."),
