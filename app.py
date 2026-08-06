@@ -316,12 +316,15 @@ def load_recent_matchstats(days: int = 90) -> pd.DataFrame:
 def add_standings(df: pd.DataFrame) -> pd.DataFrame:
     cols = ["Home St.Pos", "Away St.Pos", "Home St.PPG", "Away St.PPG",
             "Home St.Games", "Away St.Games"]
+    # Copy before touching anything. The early-return paths previously wrote
+    # columns onto the caller's frame, which on the empty path was the object
+    # returned straight from the cached loader.
+    df = df.copy()
     if df.empty:
         for c in cols:
             df[c] = pd.NA
         return df
 
-    df = df.copy()
     teams = load_standings()
     if teams.empty:
         for c in cols:
@@ -355,7 +358,7 @@ def add_standings(df: pd.DataFrame) -> pd.DataFrame:
 
 def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return df
+        return df.copy()
 
     now = datetime.now(TZ).replace(tzinfo=None)
     df = df.copy()
@@ -776,7 +779,7 @@ def _tint(norm: float, higher_is_better: bool) -> str:
     return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:{fg};"
 
 
-CORE_COLS = ["EventID", "Date", "Kickoff", "League", "HomeTeam", "AwayTeam",
+CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
 SIGNAL_COLS = ["Side", "Pick", "AdvOdds", "Implied %", "Signal", "MinOdds",
                "Model %", "Market %", "Edge", "COSOD Adv", "COSOD Opp",
@@ -929,26 +932,49 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-active = st.radio(
-    "Filter", list(FILTERS.keys()), horizontal=True,
-    label_visibility="collapsed", key="active_filter",
-)
+# Every widget below carries an explicit key. Streamlit identifies unkeyed
+# widgets by hashing their parameters and position, so any churn in either
+# silently resets their state — which is what made the column toggle appear
+# to stop working after a while.
+FILTER_KEYS = list(FILTERS.keys())
+
+st.session_state.setdefault("active_filter", FILTER_KEYS[0])
+st.session_state.setdefault("show_all_columns", False)
+
+# Guard against a stale filter name persisting in session state across a
+# deploy that renamed or removed one.
+if st.session_state["active_filter"] not in FILTERS:
+    st.session_state["active_filter"] = FILTER_KEYS[0]
+
+sel_col, tog_col, reset_col = st.columns([6, 1.4, 1])
+
+with sel_col:
+    active = st.radio(
+        "Filter", FILTER_KEYS, horizontal=True,
+        label_visibility="collapsed", key="active_filter",
+    )
+
+with tog_col:
+    show_detail = st.toggle("All columns", key="show_all_columns")
+
+with reset_col:
+    if st.button("Reset", key="reset_view", help="Clear filter and view state"):
+        for k in ("active_filter", "show_all_columns"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 with st.spinner("Loading fixtures…"):
     base = add_standings(apply_global_filters(load_fixtures()))
     scales = compute_scales(base)
     result = FILTERS[active][0](base)
 
-left, right = st.columns([3, 1])
-with left:
-    st.markdown(
-        f'<div style="font-size:15px;color:{TEXT_1};padding-top:6px;">'
-        f"{len(result)} fixture{'s' if len(result) != 1 else ''} "
-        f'<span style="color:{TEXT_3};">· {active}</span></div>',
-        unsafe_allow_html=True,
-    )
-with right:
-    show_detail = st.toggle("All columns", value=False)
+st.markdown(
+    f'<div style="font-size:15px;color:{TEXT_1};margin:2px 0 6px;">'
+    f"{len(result)} fixture{'s' if len(result) != 1 else ''} "
+    f'<span style="color:{TEXT_3};">· {active}'
+    f'{" · all columns" if show_detail else ""}</span></div>',
+    unsafe_allow_html=True,
+)
 
 render_help(active)
 
@@ -960,20 +986,28 @@ if view.empty:
         "Try another filter, or check back after the next odds refresh."
     )
 else:
+    # The key changes with filter and column mode, so the table is a fresh
+    # widget per configuration. Without this, a sort applied under one column
+    # set carried into another and the table looked frozen.
     st.dataframe(
         style_view(view, scales),
         use_container_width=True,
         height=min(620, 40 * len(view) + 60),
         hide_index=True,
+        key=f"table__{active}__{'full' if show_detail else 'compact'}",
     )
 
+    # Date only, not date-and-minute. A filename containing the current minute
+    # changed this widget's identity every 60 seconds, forcing a needless
+    # re-render of everything below it.
+    slug = active.lower().replace(" ", "_").replace("/", "").replace("%", "pct")
     st.download_button(
         "Export CSV",
         data=view.to_csv(index=False).encode("utf-8"),
-        file_name=(f"pre_game_finder_"
-                   f"{active.lower().replace(' ', '_').replace('/', '')}_"
-                   f"{datetime.now(TZ).strftime('%Y%m%d_%H%M')}.csv"),
+        file_name=(f"pre_game_finder_{slug}_"
+                   f"{datetime.now(TZ).strftime('%Y%m%d')}.csv"),
         mime="text/csv",
+        key=f"export__{active}__{'full' if show_detail else 'compact'}",
     )
 
 st.markdown(
