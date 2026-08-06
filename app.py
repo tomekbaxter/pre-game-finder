@@ -508,6 +508,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     MIN_ODDS, MIN_ABS_EDGE, MIN_REL_EDGE = 1.60, 0.07, 0.75
+    MIN_ABS_SODD = 1.0
     if df.empty:
         return df
 
