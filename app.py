@@ -188,22 +188,28 @@ def get_last_refresh() -> str:
     return ts.tz_convert(TZ).strftime("%d/%m/%Y %H:%M")
 
 
+FIXTURE_SELECT = """
+    SELECT eventid, hometeam, awayteam, league, date, kickoff,
+           home, draw, away, comopp, sodd,
+           xgh, xga, esoth, esota, hcosod, acosod,
+           homewin, drawwin, awaywin, score, value,
+           "xconvh", "xconva"{extra}
+    FROM fixtures
+    WHERE date >= CURRENT_DATE
+"""
+
+
 @st.cache_data(ttl=FIXTURES_TTL)
 def load_fixtures() -> pd.DataFrame:
-    df = pd.read_sql(
-        text(
-            """
-            SELECT eventid, hometeam, awayteam, league, date, kickoff,
-                   home, draw, away, comopp, sodd,
-                   xgh, xga, esoth, esota, hcosod, acosod,
-                   homewin, drawwin, awaywin, score, value,
-                   "xconvh", "xconva"
-            FROM fixtures
-            WHERE date >= CURRENT_DATE
-            """
-        ),
-        ENGINE,
-    )
+    # first_seen_at is only present once setup_fixtures.sql has been run, so
+    # fall back rather than taking the whole dashboard down if it is missing.
+    try:
+        df = pd.read_sql(
+            text(FIXTURE_SELECT.format(extra=", first_seen_at")), ENGINE
+        )
+    except Exception:
+        df = pd.read_sql(text(FIXTURE_SELECT.format(extra="")), ENGINE)
+        df["first_seen_at"] = pd.NaT
 
     df = df.rename(columns={
         "eventid": "EventID", "hometeam": "HomeTeam", "awayteam": "AwayTeam",
@@ -215,11 +221,20 @@ def load_fixtures() -> pd.DataFrame:
         "homewin": "HomeWin%", "drawwin": "Draw%", "awaywin": "AwayWin%",
         "score": "Score", "value": "Value",
         "xconvh": "XConvH", "xconva": "XConvA",
+        "first_seen_at": "FirstSeen",
     })
 
     df["KickoffDT"] = pd.to_datetime(
         df["Date"].astype(str) + " " + df["Kickoff"].astype(str),
         errors="coerce",
+    )
+
+    # Age since the fixture first reached Supabase. Held in UTC because that
+    # is what the sync writes; only the display converts to London.
+    seen = pd.to_datetime(df["FirstSeen"], errors="coerce", utc=True)
+    df["FirstSeen"] = seen
+    df["AddedMins"] = (
+        (pd.Timestamp.now(tz="UTC") - seen).dt.total_seconds() / 60.0
     )
     return df
 
@@ -660,6 +675,62 @@ def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Adjustable lookback for the Just Added filter. Ordered, so the control is a
+# select_slider rather than a dropdown — it reads as a scale.
+ADDED_WINDOWS = {
+    "15 min": 15,
+    "30 min": 30,
+    "1 hour": 60,
+    "3 hours": 180,
+    "6 hours": 360,
+    "12 hours": 720,
+    "24 hours": 1440,
+}
+DEFAULT_ADDED_WINDOW = "1 hour"
+
+
+def relative_age(minutes) -> str:
+    """Compact age label: 8m, 3h 20m, 2d."""
+    if minutes is None or pd.isna(minutes) or minutes < 0:
+        return "—"
+    minutes = int(minutes)
+    if minutes < 60:
+        return f"{minutes}m"
+    if minutes < 1440:
+        h, m = divmod(minutes, 60)
+        return f"{h}h" if m == 0 else f"{h}h {m:02d}m"
+    return f"{minutes // 1440}d"
+
+
+def filter_recently_added(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fixtures whose odds first reached Supabase inside the chosen window.
+
+    Uses first_seen_at, which the sync writes once on insert and never
+    updates — so this tracks when a fixture appeared, not when its odds were
+    last refreshed.
+    """
+    if df.empty:
+        return df
+
+    if "AddedMins" not in df.columns or df["AddedMins"].isna().all():
+        # setup_fixtures.sql has not been run, or nothing has been inserted
+        # since it was. Return empty rather than silently showing everything.
+        return df.iloc[0:0]
+
+    window = ADDED_WINDOWS[
+        st.session_state.get("added_window", DEFAULT_ADDED_WINDOW)
+    ]
+
+    df = df[df["AddedMins"].notna() & (df["AddedMins"] <= window)].copy()
+    if df.empty:
+        return df
+
+    df["Added"] = df["AddedMins"].map(relative_age)
+    # Newest first here, unlike every other filter, which sorts by kickoff.
+    return df.sort_values("AddedMins")
+
+
 FILTERS = {
     "All": (filter_all,
             "Every upcoming fixture with valid odds. No signal applied."),
@@ -688,6 +759,10 @@ FILTERS = {
                "The favoured side is at least 2 league places above its "
                "opponent, has at least 1.10× the points per game, is priced "
                "higher, and has SODD in its favour."),
+    "Just Added": (filter_recently_added,
+                   "Fixtures whose odds first appeared in the database inside "
+                   "the chosen window, newest first. Tracks when a fixture "
+                   "was added, not when its odds were last refreshed."),
 }
 
 
@@ -696,6 +771,7 @@ FILTERS = {
 # ============================================================
 
 GLOSSARY = [
+    ("Added", "How long ago this fixture first appeared in the database."),
     ("Side / Pick", "Which team the selected filter favours."),
     ("Adv Odds", "Decimal odds on the favoured side."),
     ("Implied %", "Probability implied by those odds."),
@@ -781,7 +857,7 @@ def _tint(norm: float, higher_is_better: bool) -> str:
 
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
-SIGNAL_COLS = ["Side", "Pick", "AdvOdds", "Implied %", "Signal", "MinOdds",
+SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "MinOdds",
                "Model %", "Market %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio"]
@@ -959,9 +1035,20 @@ with tog_col:
 
 with reset_col:
     if st.button("Reset", key="reset_view", help="Clear filter and view state"):
-        for k in ("active_filter", "show_all_columns"):
+        for k in ("active_filter", "show_all_columns", "added_window"):
             st.session_state.pop(k, None)
         st.rerun()
+
+# Only rendered for Just Added. The filter reads the value from session state
+# rather than taking it as an argument, so every filter keeps one signature.
+st.session_state.setdefault("added_window", DEFAULT_ADDED_WINDOW)
+if active == "Just Added":
+    win_col, _ = st.columns([2, 3])
+    with win_col:
+        st.select_slider(
+            "Added within", options=list(ADDED_WINDOWS),
+            key="added_window", label_visibility="collapsed",
+        )
 
 with st.spinner("Loading fixtures…"):
     base = add_standings(apply_global_filters(load_fixtures()))
@@ -972,6 +1059,7 @@ st.markdown(
     f'<div style="font-size:15px;color:{TEXT_1};margin:2px 0 6px;">'
     f"{len(result)} fixture{'s' if len(result) != 1 else ''} "
     f'<span style="color:{TEXT_3};">· {active}'
+    f'{" · last " + st.session_state["added_window"] if active == "Just Added" else ""}'
     f'{" · all columns" if show_detail else ""}</span></div>',
     unsafe_allow_html=True,
 )
@@ -981,10 +1069,17 @@ render_help(active)
 view = build_view(result, show_detail)
 
 if view.empty:
-    st.info(
-        f"No fixtures currently match the {active} filter. "
-        "Try another filter, or check back after the next odds refresh."
-    )
+    if active == "Just Added":
+        st.info(
+            f"No fixtures added in the last "
+            f"{st.session_state['added_window']}. Widen the window, or check "
+            f"back after the next odds refresh."
+        )
+    else:
+        st.info(
+            f"No fixtures currently match the {active} filter. "
+            "Try another filter, or check back after the next odds refresh."
+        )
 else:
     # The key changes with filter and column mode, so the table is a fresh
     # widget per configuration. Without this, a sort applied under one column
