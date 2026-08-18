@@ -686,7 +686,11 @@ ADDED_WINDOWS = {
     "12 hours": 720,
     "24 hours": 1440,
 }
-DEFAULT_ADDED_WINDOW = "1 hour"
+# Starts at the widest setting, so the slider sits fully to the right and the
+# tab opens showing everything added today rather than a narrow slice. Derived
+# from the dict rather than hardcoded, so it stays right-anchored if the
+# options change.
+DEFAULT_ADDED_WINDOW = list(ADDED_WINDOWS)[-1]
 
 
 def relative_age(minutes) -> str:
