@@ -1114,7 +1114,7 @@ else:
     # set carried into another and the table looked frozen.
     st.dataframe(
         style_view(view, scales),
-        use_container_width=True,
+        width="stretch",
         height=min(620, 40 * len(view) + 60),
         hide_index=True,
         key=f"table__{active}__{'full' if show_detail else 'compact'}",
