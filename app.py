@@ -1,4 +1,5 @@
 import datetime as dt
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -6,6 +7,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import NullPool
 from streamlit.errors import StreamlitSecretNotFoundError
 
 # ============================================================
@@ -122,17 +125,30 @@ def _get_db_url() -> str:
 
 @st.cache_resource
 def get_engine():
+    """
+    No SQLAlchemy pool — Supabase's pooler already does that job.
+
+    Running a pool here on top of Supavisor meant two poolers competing for
+    the same slots. On port 5432, session mode, each client connection
+    reserves a real Postgres connection for its lifetime; across three
+    dashboards and the desktop sync scripts the limit is reached and further
+    connections are refused, which surfaces as OperationalError.
+
+    NullPool opens a connection per query and closes it straight away. With
+    fixtures cached for three minutes that is very few connections an hour,
+    and none is held long enough to go stale.
+
+    Point SUPABASE_DB_URL at port 6543 — the transaction pooler — which
+    multiplexes many clients onto few Postgres connections.
+    """
     return create_engine(
         _get_db_url(),
-        pool_pre_ping=True,
-        # The engine is cached once per container and shared by every visitor.
-        # The original allowed a single connection with no overflow, so two
-        # simultaneous cold loads queued behind each other.
-        pool_size=3,
-        max_overflow=4,
-        pool_timeout=10,
-        pool_recycle=300,
-        connect_args={"sslmode": "require", "connect_timeout": 10},
+        poolclass=NullPool,
+        connect_args={
+            "sslmode": "require",
+            "connect_timeout": 10,
+            "options": "-c statement_timeout=30000",
+        },
         future=True,
     )
 
@@ -144,15 +160,23 @@ ENGINE = get_engine()
 def _healthcheck() -> bool:
     """
     Cached so it runs at most once every five minutes rather than on every
-    single interaction. The original ran SELECT 1 on every rerun, against a
-    pool that only had one connection.
+    single interaction.
+
+    Retries once: a refused connection is usually a pooler slot that frees
+    within a second, and failing the whole app on the first attempt is what
+    produced the error on load.
     """
-    try:
-        with ENGINE.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
+    for attempt in (1, 2):
+        try:
+            with ENGINE.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception as exc:
+            # Visible in Manage app -> logs, not to visitors.
+            print(f"[DB HEALTHCHECK {attempt}/2] {type(exc).__name__}: {exc}")
+            if attempt == 1:
+                time.sleep(1.5)
+    return False
 
 
 if not _healthcheck():
