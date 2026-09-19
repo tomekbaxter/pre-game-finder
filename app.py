@@ -1,5 +1,7 @@
 import datetime as dt
 import time
+import logging
+import random
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -7,9 +9,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool
 from streamlit.errors import StreamlitSecretNotFoundError
+from sqlalchemy.engine import make_url
 
 # ============================================================
 # DESIGN TOKENS  (shared with the Underlying Stats dashboard)
@@ -110,44 +113,46 @@ st.markdown(
 # CONNECTION
 # ============================================================
 
+LOGGER = logging.getLogger("pre_game_finder")
+
+
 def _get_db_url() -> str:
+    """Use the transaction-pooler URL configured in Streamlit secrets."""
     try:
         db_url = st.secrets.get("SUPABASE_DB_URL", "")
     except StreamlitSecretNotFoundError:
-        st.error("Missing Streamlit secrets. Set SUPABASE_DB_URL.")
+        st.error("Database configuration is missing. Set SUPABASE_DB_URL in Streamlit secrets.")
         st.stop()
 
     if not isinstance(db_url, str) or not db_url.strip():
         st.error("SUPABASE_DB_URL is missing or empty.")
         st.stop()
-    return db_url.strip()
+
+    db_url = db_url.strip()
+    try:
+        parsed = make_url(db_url)
+        if not parsed.drivername.startswith("postgresql") or not parsed.host:
+            raise ValueError("Expected a PostgreSQL connection URL with a hostname")
+        if parsed.port != 6543:
+            LOGGER.warning(
+                "SUPABASE_DB_URL uses port %s; Supabase transaction pooler normally uses 6543. "
+                "Confirm the port in your project's Connect dialog.", parsed.port
+            )
+    except (ValueError, TypeError) as exc:
+        # Never print the URL: it contains the database password.
+        LOGGER.error("Invalid SUPABASE_DB_URL configuration: %s", exc)
+        st.error("Invalid database configuration. Check the Streamlit secrets URL format.")
+        st.stop()
+    return db_url
 
 
 @st.cache_resource
 def get_engine():
-    """
-    No SQLAlchemy pool — Supabase's pooler already does that job.
-
-    Running a pool here on top of Supavisor meant two poolers competing for
-    the same slots. On port 5432, session mode, each client connection
-    reserves a real Postgres connection for its lifetime; across three
-    dashboards and the desktop sync scripts the limit is reached and further
-    connections are refused, which surfaces as OperationalError.
-
-    NullPool opens a connection per query and closes it straight away. With
-    fixtures cached for three minutes that is very few connections an hour,
-    and none is held long enough to go stale.
-
-    Point SUPABASE_DB_URL at port 6543 — the transaction pooler — which
-    multiplexes many clients onto few Postgres connections.
-    """
+    """One short-lived client connection per query; Supavisor pools server connections."""
     return create_engine(
         _get_db_url(),
         poolclass=NullPool,
-        connect_args={
-            "sslmode": "require",
-            "connect_timeout": 10,
-        },
+        connect_args={"sslmode": "require", "connect_timeout": 10},
         future=True,
     )
 
@@ -155,17 +160,11 @@ def get_engine():
 ENGINE = get_engine()
 
 
-# The healthcheck is gone.
-#
-# It was @st.cache_data(ttl=300), which caches the return value — including
-# False. One momentary blip therefore locked every visitor out for five
-# minutes, long after the database had recovered, and refreshing could not
-# help because the cached False was returned without the check ever running
-# again. That is precisely the "try refreshing in a moment" loop.
-#
-# It was also redundant: it opened a connection purely to prove a connection
-# could be opened, and the very next thing the app does is query fixtures.
-# Any real problem shows up there anyway, and now with a retry.
+def read_sql(query, params=None) -> pd.DataFrame:
+    """Ensure each read releases its connection, even on a query error."""
+    with ENGINE.connect() as connection:
+        return pd.read_sql(text(query) if isinstance(query, str) else query,
+                           connection, params=params)
 
 
 # ============================================================
@@ -175,11 +174,9 @@ ENGINE = get_engine()
 @st.cache_data(ttl=60)
 def get_last_refresh() -> str:
     try:
-        df = pd.read_sql(
-            text('SELECT MAX(last_synced_at) AS last_synced_at FROM fixtures'),
-            ENGINE,
-        )
+        df = read_sql('SELECT MAX(last_synced_at) AS last_synced_at FROM fixtures')
     except Exception:
+        LOGGER.exception("Failed to read fixtures last_synced_at")
         return "Unavailable"
 
     if df.empty or pd.isna(df.loc[0, "last_synced_at"]):
@@ -205,18 +202,19 @@ FIXTURE_SELECT = """
 
 
 def _read_fixtures_once() -> pd.DataFrame:
-    # first_seen_at is only present once setup_fixtures.sql has been run, so
-    # fall back rather than taking the whole dashboard down if it is missing.
+    """Only omit first_seen_at if PostgreSQL explicitly reports undefined column."""
     try:
-        df = pd.read_sql(
-            text(FIXTURE_SELECT.format(extra=", first_seen_at")), ENGINE
-        )
-    except OperationalError:
-        raise                      # connection problem, not a missing column
-    except Exception:
-        df = pd.read_sql(text(FIXTURE_SELECT.format(extra="")), ENGINE)
+        return read_sql(FIXTURE_SELECT.format(extra=", first_seen_at"))
+    except ProgrammingError as exc:
+        sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+        if sqlstate is None:
+            sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if sqlstate != "42703":  # undefined_column
+            raise
+        LOGGER.warning("first_seen_at is absent; Just Added will remain empty")
+        df = read_sql(FIXTURE_SELECT.format(extra=""))
         df["first_seen_at"] = pd.NaT
-    return df
+        return df
 
 
 @st.cache_data(ttl=FIXTURES_TTL)
@@ -235,9 +233,10 @@ def load_fixtures() -> pd.DataFrame:
         except OperationalError as exc:
             last = exc
             # Visible in Manage app -> logs, not to visitors.
-            print(f"[DB {attempt}/3] {type(exc).__name__}: {exc}")
+            LOGGER.warning("Fixtures database attempt %s/3 failed (%s)",
+                           attempt, type(exc).__name__, exc_info=True)
             if attempt < 3:
-                time.sleep(1.5 * attempt)
+                time.sleep(1.5 * attempt + random.uniform(0, 0.5))
     else:
         raise last
 
@@ -272,7 +271,7 @@ def load_fixtures() -> pd.DataFrame:
 @st.cache_data(ttl=STANDINGS_TTL)
 def load_standings() -> pd.DataFrame:
     try:
-        teams = pd.read_sql(
+        teams = read_sql(
             text(
                 """
                 SELECT "League", "TeamName", "StandingPosition",
@@ -283,10 +282,10 @@ def load_standings() -> pd.DataFrame:
                   AND "StandingPPG" IS NOT NULL
                 """
             ),
-            ENGINE,
         )
     except Exception:
-        return pd.DataFrame()
+        LOGGER.exception("Failed to load league standings")
+        raise
 
     if teams.empty:
         return teams
@@ -308,7 +307,7 @@ def load_recent_matchstats(days: int = 90) -> pd.DataFrame:
     """
     cutoff = (datetime.now(TZ).date() - dt.timedelta(days=days))
     try:
-        h2h = pd.read_sql(
+        h2h = read_sql(
             text(
                 """
                 SELECT "HomeTeam", "AwayTeam", "Date",
@@ -319,11 +318,11 @@ def load_recent_matchstats(days: int = 90) -> pd.DataFrame:
                 WHERE "Date" >= :cutoff
                 """
             ),
-            ENGINE,
             params={"cutoff": cutoff},
         )
     except Exception:
-        return pd.DataFrame()
+        LOGGER.exception("Failed to load recent matchstats")
+        raise
 
     if h2h.empty:
         return h2h
@@ -1087,17 +1086,28 @@ if active == "Just Added":
 with st.spinner("Loading fixtures…"):
     try:
         fixtures = load_fixtures()
-    except OperationalError as exc:
+    except Exception as exc:
+        LOGGER.exception("Fixtures query failed after retries")
         st.error(
-            "Couldn't reach the fixtures database. Refreshing should work — "
-            "nothing is cached from a failed attempt."
+            "Fixtures are temporarily unavailable. The database error has been "
+            "recorded in the Streamlit app logs. Try again shortly."
         )
-        st.caption(f"Details: {type(exc).__name__}")
+        st.caption(f"Error type: {type(exc).__name__}. No failed fixture result was cached.")
         st.stop()
 
-    base = add_standings(apply_global_filters(fixtures))
+    try:
+        base = add_standings(apply_global_filters(fixtures))
+    except Exception:
+        LOGGER.exception("Failed to load supplementary standings")
+        st.warning("League standings are temporarily unavailable; league filters may show no results.")
+        base = apply_global_filters(fixtures)
     scales = compute_scales(base)
-    result = FILTERS[active][0](base)
+    try:
+        result = FILTERS[active][0](base)
+    except Exception:
+        LOGGER.exception("Failed to apply filter %s", active)
+        st.error("Could not load data for this filter. Please try again later.")
+        st.stop()
 
 st.markdown(
     f'<div style="font-size:15px;color:{TEXT_1};margin:2px 0 6px;">'
