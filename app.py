@@ -30,6 +30,8 @@ TEXT_3 = "#5F6E88"
 
 HOME = "#4C8DFF"
 AWAY = "#B8894A"
+HOME_RGB = np.array([76, 141, 255])
+AWAY_RGB = np.array([184, 137, 74])
 
 # Reserved exclusively for value-vs-baseline scales. Nothing structural
 # uses these, so a red cell always means "worse", never "away team".
@@ -838,16 +840,17 @@ def render_help(active: str):
                 for t, d in GLOSSARY
             )
             + f'<div style="margin-top:10px;color:{TEXT_3};">'
-              f"Signed columns are shaded by size and direction: "
+              f"Home-vs-away differentials (SODD, ESOT Gap, xG Gap) are shaded "
+              f'<span style="color:{HOME};">blue</span> when they favour the '
+              f'home side and <span style="color:{AWAY};">gold</span> when '
+              f"they favour the away side; Side and Pick use the same colours. "
+              f"Other signed columns are shaded "
               f'<span style="color:{GOOD_HEX};">green</span> for large '
-              f'positive values, <span style="color:{BAD_HEX};">red</span> '
-              f"for large negative ones, with zero left uncoloured. On "
-              f"differentials such as SODD and COSOD, positive favours the "
-              f"home side and negative the away side — the shade indicates "
-              f"how pronounced the difference is, not which outcome is "
-              f"preferable. Intensity is set against the spread of that "
-              f"column across every upcoming fixture, so the same value "
-              f"always reads the same shade.</div></div>",
+              f'positive values and <span style="color:{BAD_HEX};">red</span> '
+              f"for large negative ones. Zero is left uncoloured, and the "
+              f"shade shows how pronounced the value is. Intensity is set "
+              f"against the spread of that column across every upcoming "
+              f"fixture, so the same value always reads the same shade.</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -878,11 +881,30 @@ def signed_colour(value, scale, higher_is_better=True) -> str:
         return ""
 
 
+def side_colour(value, scale) -> str:
+    """
+    Home-minus-away differentials (SODD, ESOT Gap, xG Gap): the sign says
+    which side is favoured, so positive tints toward the home blue and
+    negative toward the away gold, with zero uncoloured. Intensity is the
+    same size scale as the signed columns.
+    """
+    try:
+        value = float(value)
+        if pd.isna(value) or scale == 0 or value == 0:
+            return ""
+        norm = value / scale
+        return _paint(float(np.tanh(abs(norm) * 1.2)), HOME_RGB if norm > 0 else AWAY_RGB)
+    except (TypeError, ValueError):
+        return ""
+
+
 def _tint(norm: float, higher_is_better: bool) -> str:
-    intensity = float(np.tanh(abs(norm) * 1.2))
     good = norm > 0 if higher_is_better else norm < 0
-    rgb = np.clip(CELL_BASE + ((GOOD if good else BAD) - CELL_BASE)
-                  * intensity, 0, 255).astype(int)
+    return _paint(float(np.tanh(abs(norm) * 1.2)), GOOD if good else BAD)
+
+
+def _paint(intensity: float, target) -> str:
+    rgb = np.clip(CELL_BASE + (target - CELL_BASE) * intensity, 0, 255).astype(int)
     lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
     fg = PAGE_BG if lum > 140 else TEXT_1
     return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:{fg};"
@@ -907,6 +929,10 @@ SIGNED_FIELDS = [
     "SODD", "COSOD Adv", "COSOD Opp", "ESOT Gap", "xG Gap",
     "Edge", "Signal", "Pos Gap",
 ]
+
+# Of those, the home-minus-away differentials: their sign is a side, not a
+# good/bad judgement, so they use the home blue / away gold instead.
+SIDE_FIELDS = {"SODD", "ESOT Gap", "xG Gap"}
 
 # How to reconstruct each field's distribution from the full fixture set.
 # Several of these columns only exist after a filter runs, so their scale is
@@ -1014,10 +1040,20 @@ def style_view(view: pd.DataFrame, scales: dict):
     for col in SIGNED_FIELDS:
         if col not in view.columns:
             continue
+        colour = side_colour if col in SIDE_FIELDS else (
+            lambda v, s: signed_colour(v, s, True))
         styler = styler.map(
-            lambda v, s=scales.get(col, 1.0): signed_colour(v, s, True),
+            lambda v, s=scales.get(col, 1.0), f=colour: f(v, s),
             subset=[col],
         )
+
+    # Side and Pick name the favoured team: text in that side's colour.
+    side_cols = [c for c in ("Side", "Pick") if c in view.columns]
+    if "Side" in view.columns and side_cols:
+        def side_text(row):
+            colour = HOME if row["Side"] == "Home" else AWAY if row["Side"] == "Away" else None
+            return [f"color:{colour};font-weight:500;" if colour else "" for _ in side_cols]
+        styler = styler.apply(side_text, axis=1, subset=side_cols)
 
     for col, baseline in RATIO_FIELDS.items():
         if col not in view.columns:
