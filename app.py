@@ -514,7 +514,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     W_ESOT, W_XG = 1.0, 0.8
-    D0, D1, ODDS0, ODDS1, PMAX = 3.0, 5.0, 2.40, 1.40, 0.60
+    D0, D1, ODDS0, ODDS1, PMAX = 4.0, 6.0, 2.40, 1.40, 0.60   # D0/D1 3/5 -> 4/6 (2026-10-17)
     MIN_ABS_SODD = 1.0
     if df.empty:
         return df
@@ -560,7 +560,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
-    MIN_ODDS, MIN_ABS_EDGE, MIN_REL_EDGE = 1.60, 0.07, 0.75
+    MIN_ODDS, MIN_ABS_EDGE, MIN_REL_EDGE = 1.60, 0.10, 1.00   # 0.07/0.75 -> 0.10/1.00 (2026-10-17)
     MIN_ABS_SODD = 1.0
     if df.empty:
         return df
@@ -780,11 +780,11 @@ FILTERS = {
     "xG / xSoT": (filter_xg_xsot,
                   "Expected goals and expected shots on target must both "
                   "favour the same side, with a combined dominance score of "
-                  "at least 3 and a shots-on-target differential against "
+                  "at least 4 and a shots-on-target differential against "
                   "shared opponents of at least 1 either way."),
     "XWin %": (filter_xwin_percent,
                "Model win probability exceeds the odds-implied probability by "
-               "at least 7 percentage points and 75% in relative terms, with "
+               "at least 10 percentage points and 100% in relative terms, with "
                "a shots-on-target differential against shared opponents of at "
                "least 1 either way."),
     "H2H": (filter_head_to_head,
