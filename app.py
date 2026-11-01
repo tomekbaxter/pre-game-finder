@@ -437,6 +437,15 @@ def tag_side(df: pd.DataFrame, is_home: pd.Series) -> pd.DataFrame:
     return df
 
 
+def required_sodd(odds: pd.Series, floor: float, a: float, b: float) -> pd.Series:
+    """
+    The |SODD| a side needs at its price: max(floor, a - b * ln(odds)). Higher the
+    shorter the odds, where the market already prices the favourite. Identical to
+    required_sodd in the Discord notifier (footypipe/notify/pregame_criteria.py).
+    """
+    return np.maximum(floor, a - b * np.log(odds))
+
+
 def sliding_required_odds(magnitude: pd.Series, m0: float, m1: float,
                           odds0: float, odds1: float) -> pd.Series:
     """Interpolate a minimum acceptable price from the signal strength."""
@@ -453,7 +462,9 @@ def filter_all(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
-    S0, S1, ODDS0, ODDS1, PMAX = 7.0, 10.0, 1.60, 1.40, 0.80
+    # 2026-11-02: required |SODD| = max(4.0, 7.5 - 2.5 ln(odds)), odds <= 10
+    # (SODD itself recalculated the same day: 90 days, shrunk by shared opponents).
+    FLOOR, A, B, MAX_ODDS = 4.0, 7.5, 2.5, 10.0
     if df.empty:
         return df
 
@@ -461,23 +472,21 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     for c in ("SODD", "Home", "Away"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["SODD", "Home", "Away"])
-    df = df[df["SODD"].abs() >= S0]
     df = df[df["SODD"] != 0]
     if df.empty:
         return df
 
     df = tag_side(df, df["SODD"] > 0)
-    df["Signal"] = df["SODD"].abs().round(1)
-    df["MinOdds"] = sliding_required_odds(df["Signal"], S0, S1,
-                                          ODDS0, ODDS1).round(2)
-
-    df = df[(df["AdvOdds"] >= df["MinOdds"])
-            & (1.0 / df["AdvOdds"] <= PMAX)]
-    return df
+    df = df[(df["AdvOdds"] > 1) & (df["AdvOdds"] <= MAX_ODDS)]
+    df["Signal"] = df["SODD"].abs().round(2)
+    df["NeedsSODD"] = required_sodd(df["AdvOdds"], FLOOR, A, B).round(2)
+    return df[df["Signal"] >= df["NeedsSODD"]]
 
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
-    S0, S1, ODDS0, ODDS1, PMAX = 3.0, 7.0, 2.20, 1.40, 0.80
+    # 2026-11-02: required |SODD| = max(2.0, 9.0 - 6.0 ln(odds)), odds <= 10,
+    # with the favoured side's COSOD above +0.5 and the other side's below -0.5.
+    FLOOR, A, B, MAX_ODDS, ADV_MIN, WEAK_MAX = 2.0, 9.0, 6.0, 10.0, 0.5, -0.5
     if df.empty:
         return df
 
@@ -486,36 +495,32 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=required)
-    df = df[(df["SODD"].abs() >= S0) & (df["SODD"] != 0)]
+    df = df[df["SODD"] != 0]
     if df.empty:
         return df
 
     is_home = df["SODD"] > 0
     cosod_adv = np.where(is_home, df["HCOSOD"], df["ACOSOD"])
     cosod_weak = np.where(is_home, df["ACOSOD"], df["HCOSOD"])
-
-    df = df[(cosod_adv > 1) & (cosod_weak < -1)]
+    df = df[(cosod_adv > ADV_MIN) & (cosod_weak < WEAK_MAX)]
     if df.empty:
         return df
 
     df = tag_side(df, df["SODD"] > 0)
-    df["Signal"] = df["SODD"].abs().round(1)
-    df["MinOdds"] = sliding_required_odds(df["Signal"], S0, S1,
-                                          ODDS0, ODDS1).round(2)
+    df = df[(df["AdvOdds"] > 1) & (df["AdvOdds"] <= MAX_ODDS)]
+    df["Signal"] = df["SODD"].abs().round(2)
+    df["NeedsSODD"] = required_sodd(df["AdvOdds"], FLOOR, A, B).round(2)
     df["COSOD Adv"] = np.where(df["Side"] == "Home",
-                               df["HCOSOD"], df["ACOSOD"]).round(1)
+                               df["HCOSOD"], df["ACOSOD"]).round(2)
     df["COSOD Opp"] = np.where(df["Side"] == "Home",
-                               df["ACOSOD"], df["HCOSOD"]).round(1)
-
-    df = df[(df["AdvOdds"] >= df["MinOdds"])
-            & (1.0 / df["AdvOdds"] <= PMAX)]
-    return df
+                               df["ACOSOD"], df["HCOSOD"]).round(2)
+    return df[df["Signal"] >= df["NeedsSODD"]]
 
 
 def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     W_ESOT, W_XG = 1.0, 0.8
     D0, D1, ODDS0, ODDS1, PMAX = 4.0, 6.0, 2.40, 1.40, 0.60   # D0/D1 3/5 -> 4/6 (2026-10-17)
-    MIN_ABS_SODD = 1.0
+    MIN_ABS_SODD = 0.6   # 1.0 before SODD was recalculated (2026-11-02): same share of games
     if df.empty:
         return df
 
@@ -561,7 +566,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     MIN_ODDS, MIN_ABS_EDGE, MIN_REL_EDGE = 1.60, 0.10, 1.00   # 0.07/0.75 -> 0.10/1.00 (2026-10-17)
-    MIN_ABS_SODD = 1.0
+    MIN_ABS_SODD = 0.6   # 1.0 before SODD was recalculated (2026-11-02): same share of games
     if df.empty:
         return df
 
@@ -770,23 +775,24 @@ FILTERS = {
     "All": (filter_all,
             "Every upcoming fixture with valid odds. No signal applied."),
     "SODD": (filter_sodd,
-             "Shots-on-target differential against shared opponents of at "
-             "least 7, with the price on the favoured side above a sliding "
-             "minimum that tightens as the signal strengthens."),
+             "A large shots-on-target differential against shared "
+             "opponents: SODD of at least 4, and more the shorter the price "
+             "(6.1 at 1.75, 5.2 at 2.50), odds up to 10."),
     "SODD + COSOD": (filter_sodd_cosod,
-                     "As SODD but from a threshold of 3, and only where the "
-                     "favoured side also outperformed shared opponents while "
-                     "the other side underperformed them."),
+                     "The favoured side outperformed shared opponents (COSOD "
+                     "above +0.5) while the other underperformed them (below "
+                     "-0.5), with SODD of at least 2, more the shorter the "
+                     "price (5.6 at 1.75, 3.5 at 2.50), odds up to 10."),
     "xG / xSoT": (filter_xg_xsot,
                   "Expected goals and expected shots on target must both "
                   "favour the same side, with a combined dominance score of "
                   "at least 4 and a shots-on-target differential against "
-                  "shared opponents of at least 1 either way."),
+                  "shared opponents of at least 0.6 either way."),
     "XWin %": (filter_xwin_percent,
                "Model win probability exceeds the odds-implied probability by "
                "at least 10 percentage points and 100% in relative terms, with "
                "a shots-on-target differential against shared opponents of at "
-               "least 1 either way."),
+               "least 0.6 either way."),
     "H2H": (filter_head_to_head,
             "The higher-priced side had more than twice the shots on target "
             "of its opponent when these two last met, within 90 days."),
@@ -811,10 +817,14 @@ GLOSSARY = [
     ("Adv Odds", "Decimal odds on the favoured side."),
     ("Implied %", "Probability implied by those odds."),
     ("Signal", "Strength of the filter's signal. Meaning varies by filter."),
-    ("Min Odds", "The lowest price this filter accepts at that signal "
-                 "strength. Stronger signals demand shorter prices."),
-    ("SODD", "Shots-on-target differential against shared opponents. "
-             "Positive favours the home side."),
+    ("Needs SODD", "SODD filters: the SODD this price requires. It rises as "
+                   "the odds shorten, because the market prices favourites well."),
+    ("Min Odds", "xG / xSoT filter: the lowest price it accepts at that "
+                 "signal strength."),
+    ("SODD", "Shots-on-target differential against shared opponents over "
+             "the last 90 days, recent games counting most, scaled down when "
+             "there are few shared opponents (one keeps a third, five keep "
+             "71%). Positive favours the home side."),
     ("HCOSOD / ACOSOD", "Each side's own shots-on-target differential "
                         "against those shared opponents."),
     ("XGH / XGA", "Expected goals, home and away."),
@@ -912,7 +922,7 @@ def _paint(intensity: float, target) -> str:
 
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
-SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "MinOdds",
+SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD", "MinOdds",
                "Model %", "Market %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio"]
@@ -949,7 +959,7 @@ SCALE_SOURCES = {
 }
 
 DEFAULT_SCALES = {
-    "SODD": 8.0, "Signal": 8.0, "COSOD Adv": 3.0, "COSOD Opp": 3.0,
+    "SODD": 4.0, "Signal": 4.0, "COSOD Adv": 1.5, "COSOD Opp": 1.5,
     "ESOT Gap": 3.0, "xG Gap": 1.0, "Pos Gap": 8.0, "Edge": 15.0,
 }
 
