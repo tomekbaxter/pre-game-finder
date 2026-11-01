@@ -462,9 +462,9 @@ def filter_all(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
-    # 2026-11-02: required |SODD| = max(4.0, 7.5 - 2.5 ln(odds)), odds 1.50-10
+    # 2026-11-02: required |SODD| = max(3.5, 7.5 - 3.0 ln(odds)), odds 2.00-10
     # (SODD itself recalculated the same day: 90 days, shrunk by shared opponents).
-    FLOOR, A, B, MIN_ODDS, MAX_ODDS = 4.0, 7.5, 2.5, 1.50, 10.0
+    FLOOR, A, B, MIN_ODDS, MAX_ODDS = 3.5, 7.5, 3.0, 2.00, 10.0
     if df.empty:
         return df
 
@@ -484,9 +484,9 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
-    # 2026-11-02: required |SODD| = max(2.0, 9.0 - 6.0 ln(odds)), odds 1.50-10,
+    # 2026-11-02: required |SODD| = max(2.0, 11.5 - 8.5 ln(odds)), odds 2.00-10,
     # with the favoured side's COSOD above +0.5 and the other side's below -0.5.
-    FLOOR, A, B, MIN_ODDS, MAX_ODDS, ADV_MIN, WEAK_MAX = 2.0, 9.0, 6.0, 1.50, 10.0, 0.5, -0.5
+    FLOOR, A, B, MIN_ODDS, MAX_ODDS, ADV_MIN, WEAK_MAX = 2.0, 11.5, 8.5, 2.00, 10.0, 0.5, -0.5
     if df.empty:
         return df
 
@@ -776,13 +776,13 @@ FILTERS = {
             "Every upcoming fixture with valid odds. No signal applied."),
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
-             "opponents: SODD of at least 4, and more the shorter the price "
-             "(6.1 at 1.75, 5.2 at 2.50), odds 1.50 to 10."),
+             "opponents at a bigger price: odds 2.00 to 10, SODD of at least "
+             "3.5 and more the shorter the price (5.4 at 2.00, 4.8 at 2.50)."),
     "SODD + COSOD": (filter_sodd_cosod,
                      "The favoured side outperformed shared opponents (COSOD "
                      "above +0.5) while the other underperformed them (below "
-                     "-0.5), with SODD of at least 2, more the shorter the "
-                     "price (5.6 at 1.75, 3.5 at 2.50), odds 1.50 to 10."),
+                     "-0.5), at odds 2.00 to 10, with SODD of at least 2, more "
+                     "the shorter the price (5.6 at 2.00, 3.7 at 2.50)."),
     "xG / xSoT": (filter_xg_xsot,
                   "Expected goals and expected shots on target must both "
                   "favour the same side, with a combined dominance score of "
