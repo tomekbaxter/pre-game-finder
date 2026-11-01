@@ -462,9 +462,9 @@ def filter_all(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
-    # 2026-11-02: required |SODD| = max(4.0, 7.5 - 2.5 ln(odds)), odds <= 10
+    # 2026-11-02: required |SODD| = max(4.0, 7.5 - 2.5 ln(odds)), odds 1.50-10
     # (SODD itself recalculated the same day: 90 days, shrunk by shared opponents).
-    FLOOR, A, B, MAX_ODDS = 4.0, 7.5, 2.5, 10.0
+    FLOOR, A, B, MIN_ODDS, MAX_ODDS = 4.0, 7.5, 2.5, 1.50, 10.0
     if df.empty:
         return df
 
@@ -477,16 +477,16 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = tag_side(df, df["SODD"] > 0)
-    df = df[(df["AdvOdds"] > 1) & (df["AdvOdds"] <= MAX_ODDS)]
+    df = df[(df["AdvOdds"] >= MIN_ODDS) & (df["AdvOdds"] <= MAX_ODDS)]
     df["Signal"] = df["SODD"].abs().round(2)
     df["NeedsSODD"] = required_sodd(df["AdvOdds"], FLOOR, A, B).round(2)
     return df[df["Signal"] >= df["NeedsSODD"]]
 
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
-    # 2026-11-02: required |SODD| = max(2.0, 9.0 - 6.0 ln(odds)), odds <= 10,
+    # 2026-11-02: required |SODD| = max(2.0, 9.0 - 6.0 ln(odds)), odds 1.50-10,
     # with the favoured side's COSOD above +0.5 and the other side's below -0.5.
-    FLOOR, A, B, MAX_ODDS, ADV_MIN, WEAK_MAX = 2.0, 9.0, 6.0, 10.0, 0.5, -0.5
+    FLOOR, A, B, MIN_ODDS, MAX_ODDS, ADV_MIN, WEAK_MAX = 2.0, 9.0, 6.0, 1.50, 10.0, 0.5, -0.5
     if df.empty:
         return df
 
@@ -507,7 +507,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = tag_side(df, df["SODD"] > 0)
-    df = df[(df["AdvOdds"] > 1) & (df["AdvOdds"] <= MAX_ODDS)]
+    df = df[(df["AdvOdds"] >= MIN_ODDS) & (df["AdvOdds"] <= MAX_ODDS)]
     df["Signal"] = df["SODD"].abs().round(2)
     df["NeedsSODD"] = required_sodd(df["AdvOdds"], FLOOR, A, B).round(2)
     df["COSOD Adv"] = np.where(df["Side"] == "Home",
@@ -777,12 +777,12 @@ FILTERS = {
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
              "opponents: SODD of at least 4, and more the shorter the price "
-             "(6.1 at 1.75, 5.2 at 2.50), odds up to 10."),
+             "(6.1 at 1.75, 5.2 at 2.50), odds 1.50 to 10."),
     "SODD + COSOD": (filter_sodd_cosod,
                      "The favoured side outperformed shared opponents (COSOD "
                      "above +0.5) while the other underperformed them (below "
                      "-0.5), with SODD of at least 2, more the shorter the "
-                     "price (5.6 at 1.75, 3.5 at 2.50), odds up to 10."),
+                     "price (5.6 at 1.75, 3.5 at 2.50), odds 1.50 to 10."),
     "xG / xSoT": (filter_xg_xsot,
                   "Expected goals and expected shots on target must both "
                   "favour the same side, with a combined dominance score of "
