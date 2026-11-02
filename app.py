@@ -577,7 +577,7 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     A side qualifies when p_true * odds - 1 >= MIN_EV at odds of MIN_ODDS or more.
     """
     MIN_ODDS, MIN_EV = 2.00, 0.10
-    A, MODEL, SODD_W, MARKET = 0.1179, 0.2379, 0.0234, 0.1538
+    A, MODEL, SODD_W, MARKET = 0.0991, 0.2229, 0.0299, 0.1171
     if df.empty:
         return df
 
