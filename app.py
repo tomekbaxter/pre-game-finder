@@ -343,9 +343,12 @@ def load_recent_matchstats(days: int = 90) -> pd.DataFrame:
     total_goals = h2h["HomeGoals"] + h2h["AwayGoals"]
     total_shots = h2h["HomeShots"] + h2h["AwayShots"]
     total_sot = h2h["HomeShotsOn"] + h2h["AwayShotsOn"]
+    copied = ((h2h["HomeShotsOn"] == h2h["HomeGoals"])
+              & (h2h["AwayShotsOn"] == h2h["AwayGoals"]))   # SoT that only repeat the score
     h2h = h2h[(total_shots > total_goals)
               & (total_sot >= total_goals)
-              & (total_shots >= 6)].copy()
+              & (total_shots >= 6)
+              & ~copied].copy()
     if h2h.empty:
         return h2h
 
@@ -618,10 +621,14 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
+    # 2026-11-02 (identical to the Discord notifier): the last meeting within 60 days of the
+    # fixture, and the underdog had more than twice and at least 3 more of the favourite's
+    # shots on target. Meetings older than 60 days lost money; 1 v 0 or 3 v 1 is noise.
+    MAX_AGE_DAYS, MIN_SOT_GAP = 60, 3
     if df.empty:
         return df
 
-    h2h = load_recent_matchstats(90)
+    h2h = load_recent_matchstats(MAX_AGE_DAYS + 5)       # fixtures run up to 5 days ahead
     if h2h.empty:
         return df.iloc[0:0]
 
@@ -660,7 +667,10 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
     high_sot = np.where(high_was_home, df["H2H_HomeSoT"], df["H2H_AwaySoT"])
     low_sot = np.where(high_was_home, df["H2H_AwaySoT"], df["H2H_HomeSoT"])
 
-    keep = orientation_ok & low_matches & (high_sot > 2 * low_sot)
+    fixture_date = pd.to_datetime(df["KickoffDT"], errors="coerce").dt.normalize()
+    recent = (fixture_date - pd.to_datetime(df["H2H_Date"], errors="coerce").dt.normalize()).dt.days <= MAX_AGE_DAYS
+    keep = (orientation_ok & low_matches & (high_sot > 2 * low_sot)
+            & (high_sot - low_sot >= MIN_SOT_GAP) & recent.values)
     df = df[keep].copy()
     if df.empty:
         return df
@@ -798,8 +808,9 @@ FILTERS = {
                "an expected return of at least +10% at odds of 2.00 or more "
                "(no upper limit)."),
     "H2H": (filter_head_to_head,
-            "The higher-priced side had more than twice the shots on target "
-            "of its opponent when these two last met, within 90 days."),
+            "The higher-priced side had more than twice, and at least 3 more, "
+            "of its opponent's shots on target when these two last met, within "
+            "60 days. No odds limits."),
     "League": (filter_league_table,
                "The favoured side is at least 2 league places above its "
                "opponent, has at least 1.10× the points per game, is priced "
