@@ -565,51 +565,55 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
-    MIN_ODDS, MIN_ABS_EDGE, MIN_REL_EDGE = 1.60, 0.10, 1.00   # 0.07/0.75 -> 0.10/1.00 (2026-10-17)
-    MIN_ABS_SODD = 0.6   # 1.0 before SODD was recalculated (2026-11-02): same share of games
+    """
+    Calibrated value (2026-11-02), identical to the Discord notifier's XWIN rule
+    (footypipe/notify/pregame_criteria.py). Win % now comes from team ratings; the
+    model's chance, the bookmaker's (margin removed) and SODD are combined into a
+    calibrated chance that also corrects the favourite-longshot bias:
+        p_true = sigmoid(L + A + MODEL * (logit(p_model) - L) + SODD * sodd + MARKET * L)
+    A side qualifies when p_true * odds - 1 >= MIN_EV at odds of MIN_ODDS or more.
+    """
+    MIN_ODDS, MIN_EV = 2.00, 0.10
+    A, MODEL, SODD_W, MARKET = 0.1179, 0.2379, 0.0234, 0.1538
     if df.empty:
         return df
 
     df = df.copy()
-    required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "Draw%",
-                "SODD"]
+    required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "SODD"]
     for c in required:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=required)
-    df = df[(df["HomeWin%"] > 0) & (df["AwayWin%"] > 0)]
-    # Drop fixtures with effectively no shots-on-target differential against
-    # shared opponents. Magnitude only — direction need not match the edge.
-    df = df[df["SODD"].abs() >= MIN_ABS_SODD]
+    df = df[(df["Home"] > 1) & (df["Draw"] > 1) & (df["Away"] > 1)]
     if df.empty:
         return df
 
     overround = 1 / df["Home"] + 1 / df["Draw"] + 1 / df["Away"]
-    p_home_mkt = (1 / df["Home"]) / overround
-    p_away_mkt = (1 / df["Away"]) / overround
 
-    home_abs = df["HomeWin%"] / 100 - p_home_mkt
-    away_abs = df["AwayWin%"] / 100 - p_away_mkt
+    def true_prob(model_pct, odds, sodd_side):
+        market = (1 / odds) / overround
+        L = np.log(market / (1 - market))
+        pm = (model_pct / 100).clip(0.01, 0.99)
+        z = L + A + MODEL * (np.log(pm / (1 - pm)) - L) + SODD_W * sodd_side + MARKET * L
+        return market, 1 / (1 + np.exp(-z))
 
-    home_ok = ((df["Home"] >= MIN_ODDS) & (home_abs >= MIN_ABS_EDGE)
-               & (home_abs / p_home_mkt >= MIN_REL_EDGE))
-    away_ok = ((df["Away"] >= MIN_ODDS) & (away_abs >= MIN_ABS_EDGE)
-               & (away_abs / p_away_mkt >= MIN_REL_EDGE))
+    h_mkt, h_true = true_prob(df["HomeWin%"], df["Home"], df["SODD"])
+    a_mkt, a_true = true_prob(df["AwayWin%"], df["Away"], -df["SODD"])
+    h_ev, a_ev = h_true * df["Home"] - 1, a_true * df["Away"] - 1
+    home_ok = (df["Home"] >= MIN_ODDS) & (h_ev >= MIN_EV)
+    away_ok = (df["Away"] >= MIN_ODDS) & (a_ev >= MIN_EV)
 
     keep = home_ok | away_ok
     df = df[keep].copy()
     if df.empty:
         return df
 
-    # Where both sides qualify, take the larger edge.
-    prefer_home = (home_ok[keep]
-                   & (~away_ok[keep] | (home_abs[keep] >= away_abs[keep])))
+    # Where both sides qualify, take the better expected return.
+    prefer_home = home_ok[keep] & (~away_ok[keep] | (h_ev[keep] >= a_ev[keep]))
     df = tag_side(df, prefer_home)
-
-    df["Model %"] = np.where(prefer_home, df["HomeWin%"],
-                             df["AwayWin%"]).round(1)
-    df["Market %"] = np.where(prefer_home, p_home_mkt[keep] * 100,
-                              p_away_mkt[keep] * 100).round(1)
-    df["Edge"] = (df["Model %"] - df["Market %"]).round(1)
+    df["Model %"] = np.where(prefer_home, df["HomeWin%"], df["AwayWin%"]).round(1)
+    df["Market %"] = (np.where(prefer_home, h_mkt[keep], a_mkt[keep]) * 100).round(1)
+    df["True %"] = (np.where(prefer_home, h_true[keep], a_true[keep]) * 100).round(1)
+    df["Edge"] = (np.where(prefer_home, h_ev[keep], a_ev[keep]) * 100).round(1)
     return df
 
 
@@ -789,10 +793,10 @@ FILTERS = {
                   "at least 4 and a shots-on-target differential against "
                   "shared opponents of at least 0.6 either way."),
     "XWin %": (filter_xwin_percent,
-               "Model win probability exceeds the odds-implied probability by "
-               "at least 10 percentage points and 100% in relative terms, with "
-               "a shots-on-target differential against shared opponents of at "
-               "least 0.6 either way."),
+               "Value from the team-rating model: its win chance, the "
+               "bookmaker's and SODD combined into a calibrated chance, with "
+               "an expected return of at least +10% at odds of 2.00 or more "
+               "(no upper limit)."),
     "H2H": (filter_head_to_head,
             "The higher-priced side had more than twice the shots on target "
             "of its opponent when these two last met, within 90 days."),
@@ -830,11 +834,13 @@ GLOSSARY = [
     ("XGH / XGA", "Expected goals, home and away."),
     ("ESOTH / ESOTA", "Expected shots on target, home and away."),
     ("St.Pos / St.PPG", "League position and points per game."),
-    ("Model % vs Market %", "The model's win probability against the "
-                            "probability implied by the odds."),
-    ("Edge", "Model probability minus market probability, in percentage "
-             "points. Positive means the model rates it more likely than the "
-             "market does."),
+    ("Model % vs Market %", "The team-rating model's win probability against "
+                            "the bookmaker's, with the margin removed."),
+    ("True %", "XWin %: the calibrated chance, combining the model, the "
+               "bookmaker and SODD, and correcting for long odds being worse "
+               "value than they look."),
+    ("Edge", "XWin %: the expected return at this price from the True %, "
+             "in percent. The filter needs at least +10%."),
 ]
 
 
@@ -923,7 +929,7 @@ def _paint(intensity: float, target) -> str:
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
 SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD", "MinOdds",
-               "Model %", "Market %", "Edge", "COSOD Adv", "COSOD Opp",
+               "Model %", "Market %", "True %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio"]
 DETAIL_COLS = ["ComOpp", "SODD", "HCOSOD", "ACOSOD",
