@@ -2,6 +2,7 @@ import datetime as dt
 import time
 import logging
 import random
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -203,10 +204,115 @@ FIXTURE_SELECT = """
 """
 
 
+# ============================================================
+# COMPETITIONS (identical to the notifier: footypipe/competitions.py, results/standings.py)
+# ============================================================
+
+UNKNOWN_DATA_LEAGUE = "__unknown__"     # Supabase has no data_league column yet
+CUP_KEYWORDS = [
+    "cup", "copa", "coppa", "coupe", "taça", "taca", "pokal",
+    "trophy", "shield", "super cup", "supercup", "league cup",
+    "fa cup", "dfb pokal", "playoff", "play-offs", "play off",
+    "knockout", "knock-out", "champions league", "europa league",
+    "conference league", "libertadores", "sudamericana", "concacaf",
+    "afc champions",
+]
+CROSS_RE = re.compile(
+    r"\buefa\b|\binternational\b|\bfriendl|\bqual\b|qualif|olympic|asian games|\bconmebol\b|\bconcacaf\b|"
+    r"\bcaf\b|\bafc\b|\bofc\b|\bcosafa\b|\bcecafa\b|\bwaff\b|\baff\b|\bsaff\b|euro(pean)? .*ch(\.|ampion)ship|"
+    r"world cup|nations league|ch\.ship|\btournament\b|\binvitational\b|\bgames\b", re.I)
+
+
+def is_cross(league) -> bool:
+    """A cup, or a competition across leagues or countries."""
+    name = str(league or "").strip().casefold()
+    return any(k in name for k in CUP_KEYWORDS) or bool(CROSS_RE.search(name))
+
+
+def comparable_only(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop cup / cross-competition fixtures without comparable data: the model gave them
+    none (DataLeague empty). Until Supabase has the column, every cross fixture is dropped.
+    """
+    if df.empty or "League" not in df.columns:
+        return df
+    cross = df["League"].map(is_cross)
+    dl = df["DataLeague"] if "DataLeague" in df.columns else pd.Series(UNKNOWN_DATA_LEAGUE, index=df.index)
+    usable = dl.notna() & (dl != UNKNOWN_DATA_LEAGUE) & (dl.astype(str).str.len() > 0)
+    return df[~cross | usable]
+
+
+def new_season(dates_desc, gap_days: int = 50):
+    """The first gap over 50 days, newest first, marks the season start (results/calc.py)."""
+    if not dates_desc:
+        return None
+    last = dates_desc[0]
+    for d in dates_desc[1:]:
+        if (last - d).days > gap_days:
+            return last
+        last = d
+    return dates_desc[-1]
+
+
+@st.cache_data(ttl=STANDINGS_TTL)
+def load_league_tables(leagues: tuple) -> dict:
+    """
+    {league: {team: points, games, goals for / against, last played, group}} from the league's own
+    matches this season, as the notifier's pregame.preload_league_tables builds them.
+    """
+    if not leagues:
+        return {}
+    today = datetime.now(TZ).date()
+    m = read_sql(text("""
+        SELECT DISTINCT ON ("EventID") "League", "Date", "HomeTeam", "AwayTeam", "HomeGoals", "AwayGoals"
+        FROM matchstats WHERE "League" = ANY(:leagues) AND "Date" >= :since AND "Date" < :today
+          AND "HomeGoals" IS NOT NULL AND "AwayGoals" IS NOT NULL
+        ORDER BY "EventID", "Date"
+    """), params={"leagues": list(leagues), "since": today - dt.timedelta(days=400), "today": today})
+    tables = {}
+    for league, g in m.groupby("League"):
+        dates = sorted({pd.Timestamp(d).date() for d in g["Date"]})
+        season = new_season(dates[::-1])
+        teams, parent = {}, {}
+
+        def find(t):
+            while parent.setdefault(t, t) != t:
+                parent[t] = parent[parent[t]]
+                t = parent[t]
+            return t
+
+        for d, h, a, hg, ag in g[["Date", "HomeTeam", "AwayTeam", "HomeGoals", "AwayGoals"]].itertuples(index=False):
+            d = pd.Timestamp(d).date()
+            if d < season:
+                continue
+            for t, f, x in ((h, hg, ag), (a, ag, hg)):
+                r = teams.setdefault(t, dict(pts=0, g=0, gf=0.0, ga=0.0, last=d))
+                r["pts"] += 3 if f > x else 1 if f == x else 0
+                r["g"] += 1
+                r["gf"] += float(f)
+                r["ga"] += float(x)
+                r["last"] = max(r["last"], d)
+            parent[find(h)] = find(a)
+        for t, r in teams.items():
+            r["group"] = find(t)
+        tables[league] = teams
+    return tables
+
+
 def _read_fixtures_once() -> pd.DataFrame:
-    """Only omit first_seen_at if PostgreSQL explicitly reports undefined column."""
+    """Only omit first_seen_at / data_league if PostgreSQL explicitly reports undefined column."""
     try:
-        return read_sql(FIXTURE_SELECT.format(extra=", first_seen_at"))
+        return read_sql(FIXTURE_SELECT.format(extra=", first_seen_at, data_league"))
+    except ProgrammingError as exc:
+        sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
+        if sqlstate is None:
+            sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if sqlstate != "42703":
+            raise
+    try:
+        df = read_sql(FIXTURE_SELECT.format(extra=", first_seen_at"))
+        df["data_league"] = UNKNOWN_DATA_LEAGUE
+        return df
     except ProgrammingError as exc:
         sqlstate = getattr(getattr(exc, "orig", None), "pgcode", None)
         if sqlstate is None:
@@ -216,6 +322,7 @@ def _read_fixtures_once() -> pd.DataFrame:
         LOGGER.warning("first_seen_at is absent; Just Added will remain empty")
         df = read_sql(FIXTURE_SELECT.format(extra=""))
         df["first_seen_at"] = pd.NaT
+        df["data_league"] = UNKNOWN_DATA_LEAGUE
         return df
 
 
@@ -252,7 +359,7 @@ def load_fixtures() -> pd.DataFrame:
         "homewin": "HomeWin%", "drawwin": "Draw%", "awaywin": "AwayWin%",
         "score": "Score", "value": "Value",
         "xconvh": "XConvH", "xconva": "XConvA",
-        "first_seen_at": "FirstSeen",
+        "first_seen_at": "FirstSeen", "data_league": "DataLeague",
     })
 
     df["KickoffDT"] = pd.to_datetime(
@@ -684,45 +791,49 @@ def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_league_table(df: pd.DataFrame) -> pd.DataFrame:
-    MIN_GAMES, MIN_POS_GAP, MIN_PPG_RATIO = 5, 2, 1.10
+    """
+    2026-11-02, identical to the Discord notifier's LEAGUE rule: the market underdog is clearly
+    the better side on this season's table. Its goal difference per game (shrunk towards 0 by K
+    games) beats the favourite's by z >= MIN_Z (the gap over its uncertainty, so few games need a
+    bigger gap); both teams in the same group, neither out for 3+ months; SODD agrees by MIN_SODD+.
+    """
+    K, SD_GD, MIN_Z, MIN_SODD, GAP_DAYS = 6.0, 1.8, 2.0, 0.5, 90
     if df.empty:
         return df
-
     df = df.copy()
-    required = ["Home", "Away", "SODD", "Home St.Pos", "Away St.Pos",
-                "Home St.PPG", "Away St.PPG",
-                "Home St.Games", "Away St.Games"]
-    for col in required:
-        if col not in df.columns:
-            df[col] = pd.NA
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.dropna(subset=required)
-    df = df[(df["Home St.Games"] >= MIN_GAMES)
-            & (df["Away St.Games"] >= MIN_GAMES)
-            & (df["Home St.PPG"] > 0) & (df["Away St.PPG"] > 0)]
+    for c in ("Home", "Away", "SODD"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["Home", "Away", "SODD"])
+    df = df[(df["Home"] > 1) & (df["Away"] > 1) & (df["Home"] != df["Away"])]
     if df.empty:
         return df
+    data_league = df["DataLeague"].where(
+        df["DataLeague"].notna() & (df["DataLeague"] != UNKNOWN_DATA_LEAGUE), df["League"])
+    tables = load_league_tables(tuple(sorted(set(data_league.dropna()))))
 
-    home_edge = (((df["Away St.Pos"] - df["Home St.Pos"]) >= MIN_POS_GAP)
-                 & (df["Home St.PPG"] >= df["Away St.PPG"] * MIN_PPG_RATIO)
-                 & (df["Home"] > df["Away"]) & (df["SODD"] > 0))
-    away_edge = (((df["Home St.Pos"] - df["Away St.Pos"]) >= MIN_POS_GAP)
-                 & (df["Away St.PPG"] >= df["Home St.PPG"] * MIN_PPG_RATIO)
-                 & (df["Away"] > df["Home"]) & (df["SODD"] < 0))
-
-    keep = home_edge | away_edge
-    df = df[keep].copy()
+    picks, zs, gds = [], [], []
+    for (idx, r), lg in zip(df.iterrows(), data_league):
+        table = tables.get(lg, {})
+        h, a = table.get(r["HomeTeam"]), table.get(r["AwayTeam"])
+        if not h or not a or h["group"] != a["group"]:
+            picks.append(None); zs.append(None); gds.append(None); continue
+        played = pd.Timestamp(r["KickoffDT"]).date() if pd.notna(r["KickoffDT"]) else None
+        if played and any((played - t["last"]).days > GAP_DAYS for t in (h, a)):
+            picks.append(None); zs.append(None); gds.append(None); continue
+        home_dog = r["Home"] > r["Away"]
+        me, them = (h, a) if home_dog else (a, h)
+        gap = (me["gf"] - me["ga"]) / (me["g"] + K) - (them["gf"] - them["ga"]) / (them["g"] + K)
+        z = gap / (SD_GD * np.sqrt(1 / (me["g"] + K) + 1 / (them["g"] + K)))
+        sodd = r["SODD"] * (1 if home_dog else -1)
+        ok = z >= MIN_Z and sodd >= MIN_SODD
+        picks.append(home_dog if ok else None)
+        zs.append(round(z, 2))
+        gds.append(f"{int(me['gf'] - me['ga']):+d} in {me['g']} v {int(them['gf'] - them['ga']):+d} in {them['g']}")
+    df["_pick"], df["Table z"], df["GD (games)"] = picks, zs, gds
+    df = df[df["_pick"].notna()].copy()
     if df.empty:
         return df
-
-    # Recomputed against the filtered index rather than reusing the stale mask.
-    df = tag_side(df, home_edge[keep])
-    df["Pos Gap"] = (df[["Home St.Pos", "Away St.Pos"]].max(axis=1)
-                     - df[["Home St.Pos", "Away St.Pos"]].min(axis=1))
-    df["PPG Ratio"] = (df[["Home St.PPG", "Away St.PPG"]].max(axis=1)
-                       / df[["Home St.PPG", "Away St.PPG"]].min(axis=1)).round(2)
-    return df
+    return tag_side(df, df["_pick"].astype(bool)).drop(columns="_pick")
 
 
 # Adjustable lookback for the Just Added filter. Ordered, so the control is a
@@ -812,9 +923,10 @@ FILTERS = {
             "of its opponent's shots on target when these two last met, within "
             "60 days. No odds limits."),
     "League": (filter_league_table,
-               "The favoured side is at least 2 league places above its "
-               "opponent, has at least 1.10× the points per game, is priced "
-               "higher, and has SODD in its favour."),
+               "The market underdog is clearly the better side on this "
+               "season's table: its goal difference per game beats the "
+               "favourite's by z of 2 or more (allowing for games played), "
+               "same group, and SODD agrees. A handful of games a month."),
     "Just Added": (filter_recently_added,
                    "Fixtures whose odds first appeared in the database inside "
                    "the chosen window, newest first. Tracks when a fixture "
@@ -845,6 +957,9 @@ GLOSSARY = [
     ("XGH / XGA", "Expected goals, home and away."),
     ("ESOTH / ESOTA", "Expected shots on target, home and away."),
     ("St.Pos / St.PPG", "League position and points per game."),
+    ("Table z / GD (games)", "League filter: how clearly the underdog is the better side on "
+                             "goal difference per game, allowing for games played (2+ "
+                             "qualifies), and both teams' goal difference and games."),
     ("Model % vs Market %", "The team-rating model's win probability against "
                             "the bookmaker's, with the margin removed."),
     ("True %", "XWin %: the calibrated chance, combining the model, the "
@@ -942,7 +1057,7 @@ CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
 SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD", "MinOdds",
                "Model %", "Market %", "True %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
-               "Pos Gap", "PPG Ratio"]
+               "Pos Gap", "PPG Ratio", "Table z", "GD (games)"]
 DETAIL_COLS = ["ComOpp", "SODD", "HCOSOD", "ACOSOD",
                "Home St.Pos", "Away St.Pos", "Home St.PPG", "Away St.PPG",
                "XGH", "XGA", "ESOTH", "ESOTA", "XConvH", "XConvA",
@@ -1166,7 +1281,9 @@ with st.spinner("Loading fixtures…"):
         base = apply_global_filters(fixtures)
     scales = compute_scales(base)
     try:
-        result = FILTERS[active][0](base)
+        # Cup / cross-competition games without comparable data: no signal filter applies.
+        source = base if active in ("All", "Just Added") else comparable_only(base)
+        result = FILTERS[active][0](source)
     except Exception:
         LOGGER.exception("Failed to apply filter %s", active)
         st.error("Could not load data for this filter. Please try again later.")
