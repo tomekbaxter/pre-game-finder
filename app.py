@@ -891,9 +891,76 @@ def filter_recently_added(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("AddedMins")
 
 
+def same_base_only(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop cup / cross-competition fixtures between teams from different base leagues (the
+    fixture uses the competition's own history: DataLeague is the competition itself).
+    XWin %, xG / xSoT and League don't apply to them, as in the notifier.
+    """
+    if df.empty or "League" not in df.columns or "DataLeague" not in df.columns:
+        return df
+    own = df["League"].map(is_cross) & (df["DataLeague"].astype(str) == df["League"].astype(str))
+    return df[~own]
+
+
+NOT_ACROSS_LEAGUES = {"xG / xSoT", "XWin %", "League"}
+NEEDS_COMPANY = {"H2H", "League"}
+NOT_FOUR = {"SODD", "SODD + COSOD", "XWin %", "xG / xSoT"}
+STAKE_UNITS = {1: 1, 2: 2, 3: 2, 4: 3}
+
+
+def filter_alerts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    What the Discord notifier sends (footypipe/notify/pregame_criteria.evaluate_fixture):
+    every filter's picks combined per fixture.
+      - XWin %, xG / xSoT and League don't count in cup games between different base leagues;
+      - filters that disagree on the side drop the fixture;
+      - H2H or League alone is not enough: with either, at least two filters must pass;
+      - stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u (SODD, SODD + COSOD, XWin % and
+        xG / xSoT as an exact four count as three).
+    """
+    if df.empty:
+        return df
+    passes = {}                                   # EventID -> [(filter, side)]
+    for name in SIGNAL_FILTERS:
+        src = same_base_only(df) if name in NOT_ACROSS_LEAGUES else df
+        try:
+            out = FILTERS[name][0](src)
+        except Exception:
+            LOGGER.exception("Alerts: filter %s failed", name)
+            continue
+        for eid, side in zip(out.get("EventID", []), out.get("Side", [])):
+            passes.setdefault(eid, []).append((name, side))
+    keep = {}
+    for eid, ps in passes.items():
+        sides = {s for _, s in ps}
+        names = {n for n, _ in ps}
+        if len(sides) > 1:
+            continue
+        if len(names) < 2 and names & NEEDS_COMPANY:
+            continue
+        n = 3 if names == NOT_FOUR else min(len(names), 4)
+        keep[eid] = (sides.pop(), [n_ for n_ in SIGNAL_FILTERS if n_ in names], STAKE_UNITS[n])
+    df = df[df["EventID"].isin(keep)].copy()
+    if df.empty:
+        return df
+    df = tag_side(df, df["EventID"].map(lambda e: keep[e][0] == "Home"))
+    df["Filters"] = df["EventID"].map(lambda e: ", ".join(keep[e][1]))
+    df["Stake"] = df["EventID"].map(lambda e: f"{keep[e][2]}u")
+    return df
+
+
+SIGNAL_FILTERS = ["SODD", "SODD + COSOD", "xG / xSoT", "XWin %", "H2H", "League"]
+
 FILTERS = {
     "All": (filter_all,
             "Every upcoming fixture with valid odds. No signal applied."),
+    "Alerts": (filter_alerts,
+               "Exactly what the Discord notifier sends: every filter combined. "
+               "H2H or League alone is not enough, filters that disagree on the "
+               "side drop the game, and in cup games between teams from "
+               "different leagues XWin %, xG / xSoT and League don't count. "
+               "Stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u."),
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
              "opponents at a bigger price: odds 2.00 or more, SODD of at least "
@@ -1049,7 +1116,7 @@ def _paint(intensity: float, target) -> str:
 
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
-SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD",
+SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Stake", "Filters", "Signal", "NeedsSODD",
                "Model %", "Market %", "True %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio", "Table z", "GD (games)"]
@@ -1278,6 +1345,9 @@ with st.spinner("Loading fixtures…"):
     try:
         # Cup / cross-competition games without comparable data: no signal filter applies.
         source = base if active in ("All", "Just Added") else comparable_only(base)
+        # Cup games between teams from different base leagues: the model and table filters don't apply.
+        if active in NOT_ACROSS_LEAGUES:
+            source = same_base_only(source)
         result = FILTERS[active][0](source)
     except Exception:
         LOGGER.exception("Failed to apply filter %s", active)
