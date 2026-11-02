@@ -560,6 +560,18 @@ def required_sodd(odds: pd.Series, floor: float, a: float, b: float) -> pd.Serie
 # FILTERS
 # ============================================================
 
+# The dashboard's filter tabs also show games that nearly pass ("Near"); only "Alert" rows meet
+# the notifier's thresholds, and only they count in the Alerts tab. Near-misses replayed
+# Mar-Oct made far less than alerts (about break-even to +12%), so they are for watching, not betting.
+NEAR_SODD = 0.85                    # share of the required SODD
+NEAR_COSOD = 0.35                   # COSOD above +0.35 / below -0.35 (alert: 0.5)
+
+
+def mark_status(df: pd.DataFrame, alert: pd.Series) -> pd.DataFrame:
+    df["Status"] = np.where(alert, "Alert", "Near")
+    return df
+
+
 def filter_all(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
@@ -583,7 +595,8 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["AdvOdds"] >= MIN_ODDS]
     df["Signal"] = df["SODD"].abs().round(2)
     df["NeedsSODD"] = required_sodd(df["AdvOdds"], FLOOR, A, B).round(2)
-    return df[df["Signal"] >= df["NeedsSODD"]]
+    df = df[df["Signal"] >= NEAR_SODD * df["NeedsSODD"]].copy()
+    return mark_status(df, df["Signal"] >= df["NeedsSODD"])
 
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
@@ -605,7 +618,7 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     is_home = df["SODD"] > 0
     cosod_adv = np.where(is_home, df["HCOSOD"], df["ACOSOD"])
     cosod_weak = np.where(is_home, df["ACOSOD"], df["HCOSOD"])
-    df = df[(cosod_adv > ADV_MIN) & (cosod_weak < WEAK_MAX)]
+    df = df[(cosod_adv > NEAR_COSOD) & (cosod_weak < -NEAR_COSOD)]
     if df.empty:
         return df
 
@@ -617,7 +630,10 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
                                df["HCOSOD"], df["ACOSOD"]).round(2)
     df["COSOD Opp"] = np.where(df["Side"] == "Home",
                                df["ACOSOD"], df["HCOSOD"]).round(2)
-    return df[df["Signal"] >= df["NeedsSODD"]]
+    df = df[df["Signal"] >= NEAR_SODD * df["NeedsSODD"]].copy()
+    adv = np.where(df["Side"] == "Home", df["HCOSOD"], df["ACOSOD"])
+    weak = np.where(df["Side"] == "Home", df["ACOSOD"], df["HCOSOD"])
+    return mark_status(df, (df["Signal"] >= df["NeedsSODD"]) & (adv > ADV_MIN) & (weak < WEAK_MAX))
 
 
 def poisson_win_pct(xgh: pd.Series, xga: pd.Series, max_goals: int = 15):
@@ -637,13 +653,14 @@ def poisson_win_pct(xgh: pd.Series, xga: pd.Series, max_goals: int = 15):
             pd.Series(np.round(aw / total * 100, 2), index=xgh.index))
 
 
-def calibrated_value(df: pd.DataFrame, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET):
+def calibrated_value(df: pd.DataFrame, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET, NEAR_EV):
     """
     The calibrated value rule shared by XWin % and xG / xSoT (identical to the notifier's
     xwin_true_prob): the model's chance, the bookmaker's (margin removed) and SODD combine into
         p_true = sigmoid(L + A + MODEL * (logit(p_model) - L) + SODD * sodd + MARKET * L)
     A side qualifies when p_true * odds - 1 >= MIN_EV at odds of MIN_ODDS or more.
-    Returns the qualifying rows tagged with the better side, plus Model / Market / True % and Edge.
+    Returns rows with expected return >= NEAR_EV tagged with the better side, plus Model / Market /
+    True %, Edge, and Status ("Alert" at MIN_EV, else "Near").
     """
     overround = 1 / df["Home"] + 1 / df["Draw"] + 1 / df["Away"]
 
@@ -657,8 +674,8 @@ def calibrated_value(df: pd.DataFrame, home_pct, away_pct, MIN_ODDS, MIN_EV, A, 
     h_mkt, h_true = true_prob(home_pct, df["Home"], df["SODD"])
     a_mkt, a_true = true_prob(away_pct, df["Away"], -df["SODD"])
     h_ev, a_ev = h_true * df["Home"] - 1, a_true * df["Away"] - 1
-    home_ok = (df["Home"] >= MIN_ODDS) & (h_ev >= MIN_EV)
-    away_ok = (df["Away"] >= MIN_ODDS) & (a_ev >= MIN_EV)
+    home_ok = (df["Home"] >= MIN_ODDS) & (h_ev >= NEAR_EV)
+    away_ok = (df["Away"] >= MIN_ODDS) & (a_ev >= NEAR_EV)
 
     keep = home_ok | away_ok
     df = df[keep].copy()
@@ -672,7 +689,7 @@ def calibrated_value(df: pd.DataFrame, home_pct, away_pct, MIN_ODDS, MIN_EV, A, 
     df["Market %"] = (np.where(prefer_home, h_mkt[keep], a_mkt[keep]) * 100).round(1)
     df["True %"] = (np.where(prefer_home, h_true[keep], a_true[keep]) * 100).round(1)
     df["Edge"] = (np.where(prefer_home, h_ev[keep], a_ev[keep]) * 100).round(1)
-    return df
+    return mark_status(df, np.where(prefer_home, h_ev[keep], a_ev[keep]) >= MIN_EV)
 
 
 def _priced(df: pd.DataFrame, required) -> pd.DataFrame:
@@ -691,7 +708,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     constants, and needs an expected return of at least +12% at odds of 2.00 or more.
     Replayed Mar-Oct out of sample: 183 bets, +39.1%, 7 of 8 months in profit.
     """
-    MIN_ODDS, MIN_EV = 2.00, 0.12
+    MIN_ODDS, MIN_EV, NEAR_EV = 2.00, 0.12, 0.08
     A, MODEL, SODD_W, MARKET = 0.0954, 0.1553, 0.0282, 0.1195
     if df.empty:
         return df
@@ -700,7 +717,7 @@ def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     home_pct, away_pct = poisson_win_pct(df["XGH"], df["XGA"])
-    out = calibrated_value(df, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET)
+    out = calibrated_value(df, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET, NEAR_EV)
     if not out.empty:
         out["xG Gap"] = (out["XGH"] - out["XGA"]).round(2)
     return out
@@ -712,14 +729,14 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     (footypipe/notify/pregame_criteria.py). Win % now comes from team ratings; see
     calibrated_value for the formula.
     """
-    MIN_ODDS, MIN_EV = 2.00, 0.10
+    MIN_ODDS, MIN_EV, NEAR_EV = 2.00, 0.10, 0.07
     A, MODEL, SODD_W, MARKET = 0.0991, 0.2229, 0.0299, 0.1171
     if df.empty:
         return df
     df = _priced(df, ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "SODD"])
     if df.empty:
         return df
-    return calibrated_value(df, df["HomeWin%"], df["AwayWin%"], MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET)
+    return calibrated_value(df, df["HomeWin%"], df["AwayWin%"], MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET, NEAR_EV)
 
 
 def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
@@ -926,6 +943,8 @@ def filter_alerts(df: pd.DataFrame) -> pd.DataFrame:
         src = same_base_only(df) if name in NOT_ACROSS_LEAGUES else df
         try:
             out = FILTERS[name][0](src)
+            if "Status" in out.columns:
+                out = out[out["Status"] == "Alert"]             # near-misses never alert
         except Exception:
             LOGGER.exception("Alerts: filter %s failed", name)
             continue
@@ -964,22 +983,24 @@ FILTERS = {
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
              "opponents at a bigger price: odds 2.00 or more, SODD of at least "
-             "3.5 and more the shorter the price (5.4 at 2.00, 4.8 at 2.50)."),
+             "3.5 and more the shorter the price (5.4 at 2.00, 4.8 at 2.50). "
+             "Also shows near misses (85% of that SODD) as Near."),
     "SODD + COSOD": (filter_sodd_cosod,
                      "The favoured side outperformed shared opponents (COSOD "
                      "above +0.5) while the other underperformed them (below "
                      "-0.5), at odds 2.00 or more, with SODD of at least 2, more "
-                     "the shorter the price (5.6 at 2.00, 3.7 at 2.50)."),
+                     "the shorter the price (5.6 at 2.00, 3.7 at 2.50). Near: 85% of "
+                     "that SODD, COSOD beyond ±0.35."),
     "xG / xSoT": (filter_xg_xsot,
                   "Value from the shots view: expected goals built from "
                   "shots on target, the bookmaker's chance and SODD combined "
                   "into a calibrated chance, with an expected return of at "
-                  "least +12% at odds of 2.00 or more (no upper limit)."),
+                  "least +12% at odds of 2.00 or more (no upper limit). Near: +8%."),
     "XWin %": (filter_xwin_percent,
                "Value from the team-rating model: its win chance, the "
                "bookmaker's and SODD combined into a calibrated chance, with "
                "an expected return of at least +10% at odds of 2.00 or more "
-               "(no upper limit)."),
+               "(no upper limit). Near: +7%."),
     "H2H": (filter_head_to_head,
             "The higher-priced side had more than twice, and at least 3 more, "
             "of its opponent's shots on target when these two last met, within "
@@ -1003,6 +1024,9 @@ FILTERS = {
 GLOSSARY = [
     ("Added", "How long ago this fixture first appeared in the database."),
     ("Side / Pick", "Which team the selected filter favours."),
+    ("Status", "Alert: meets the notifier's threshold (it counts in the Alerts tab). "
+               "Near: close but below it. Near misses replayed far weaker than alerts, so "
+               "they are for watching, not betting."),
     ("Adv Odds", "Decimal odds on the favoured side."),
     ("Implied %", "Probability implied by those odds."),
     ("Signal", "Strength of the filter's signal. Meaning varies by filter."),
@@ -1116,7 +1140,7 @@ def _paint(intensity: float, target) -> str:
 
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
-SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Stake", "Filters", "Signal", "NeedsSODD",
+SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Status", "Stake", "Filters", "Signal", "NeedsSODD",
                "Model %", "Market %", "True %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio", "Table z", "GD (games)"]
