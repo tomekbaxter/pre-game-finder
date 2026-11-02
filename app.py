@@ -556,13 +556,6 @@ def required_sodd(odds: pd.Series, floor: float, a: float, b: float) -> pd.Serie
     return np.maximum(floor, a - b * np.log(odds))
 
 
-def sliding_required_odds(magnitude: pd.Series, m0: float, m1: float,
-                          odds0: float, odds1: float) -> pd.Series:
-    """Interpolate a minimum acceptable price from the signal strength."""
-    req = odds0 + (odds1 - odds0) * (magnitude - m0) / (m1 - m0)
-    return req.clip(lower=odds1)
-
-
 # ============================================================
 # FILTERS
 # ============================================================
@@ -627,76 +620,31 @@ def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["Signal"] >= df["NeedsSODD"]]
 
 
-def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
-    W_ESOT, W_XG = 1.0, 0.8
-    D0, D1, ODDS0, ODDS1, PMAX = 4.0, 6.0, 2.40, 1.40, 0.60   # D0/D1 3/5 -> 4/6 (2026-10-17)
-    MIN_ABS_SODD = 0.6   # 1.0 before SODD was recalculated (2026-11-02): same share of games
-    if df.empty:
-        return df
-
-    df = df.copy()
-    required = ["XGH", "XGA", "ESOTH", "ESOTA", "Home", "Away", "SODD"]
-    for c in required:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=required)
-    if df.empty:
-        return df
-
-    esot_gap = df["ESOTH"] - df["ESOTA"]
-    xg_gap = df["XGH"] - df["XGA"]
-    dom = (W_ESOT * esot_gap) + (W_XG * xg_gap)
-
-    # Both signals must agree with the dominance direction.
-    agree = (((dom > 0) & (esot_gap > 0) & (xg_gap > 0))
-             | ((dom < 0) & (esot_gap < 0) & (xg_gap < 0)))
-    # Drop fixtures with effectively no shots-on-target differential against
-    # shared opponents. Magnitude only — direction is not required to match
-    # the xG signal.
-    has_sodd = df["SODD"].abs() >= MIN_ABS_SODD
-    keep = (dom.abs() >= D0) & agree & has_sodd
-
-    df = df[keep].copy()
-    if df.empty:
-        return df
-
-    esot_gap, xg_gap = esot_gap[keep], xg_gap[keep]
-    dom = dom[keep]
-
-    df = tag_side(df, dom > 0)
-    df["ESOT Gap"] = esot_gap.round(2)
-    df["xG Gap"] = xg_gap.round(2)
-    df["Signal"] = dom.abs().round(2)
-    df["MinOdds"] = sliding_required_odds(df["Signal"], D0, D1,
-                                          ODDS0, ODDS1).round(2)
-
-    df = df[(df["AdvOdds"] >= df["MinOdds"])
-            & (1.0 / df["AdvOdds"] <= PMAX)]
-    return df
+def poisson_win_pct(xgh: pd.Series, xga: pd.Series, max_goals: int = 15):
+    """Home and away win % from two Poisson goal rates, as the pipeline's FixtureModel.poisson."""
+    k = np.arange(max_goals + 1)
+    fact = np.array([float(np.prod(np.arange(1, i + 1))) for i in k])
+    def probs(lam):
+        lam = np.clip(lam.to_numpy(dtype=float), 0, None)[:, None]
+        return lam ** k * np.exp(-lam) / fact
+    hp, ap = probs(xgh), probs(xga)
+    grid = hp[:, :, None] * ap[:, None, :]                  # [fixture, home goals, away goals]
+    home_mask = k[:, None] > k[None, :]
+    hw = (grid * home_mask).sum(axis=(1, 2))
+    aw = (grid * home_mask.T).sum(axis=(1, 2))
+    total = grid.sum(axis=(1, 2))
+    return (pd.Series(np.round(hw / total * 100, 2), index=xgh.index),
+            pd.Series(np.round(aw / total * 100, 2), index=xgh.index))
 
 
-def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
+def calibrated_value(df: pd.DataFrame, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET):
     """
-    Calibrated value (2026-11-02), identical to the Discord notifier's XWIN rule
-    (footypipe/notify/pregame_criteria.py). Win % now comes from team ratings; the
-    model's chance, the bookmaker's (margin removed) and SODD are combined into a
-    calibrated chance that also corrects the favourite-longshot bias:
+    The calibrated value rule shared by XWin % and xG / xSoT (identical to the notifier's
+    xwin_true_prob): the model's chance, the bookmaker's (margin removed) and SODD combine into
         p_true = sigmoid(L + A + MODEL * (logit(p_model) - L) + SODD * sodd + MARKET * L)
     A side qualifies when p_true * odds - 1 >= MIN_EV at odds of MIN_ODDS or more.
+    Returns the qualifying rows tagged with the better side, plus Model / Market / True % and Edge.
     """
-    MIN_ODDS, MIN_EV = 2.00, 0.10
-    A, MODEL, SODD_W, MARKET = 0.0991, 0.2229, 0.0299, 0.1171
-    if df.empty:
-        return df
-
-    df = df.copy()
-    required = ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "SODD"]
-    for c in required:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=required)
-    df = df[(df["Home"] > 1) & (df["Draw"] > 1) & (df["Away"] > 1)]
-    if df.empty:
-        return df
-
     overround = 1 / df["Home"] + 1 / df["Draw"] + 1 / df["Away"]
 
     def true_prob(model_pct, odds, sodd_side):
@@ -706,8 +654,8 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
         z = L + A + MODEL * (np.log(pm / (1 - pm)) - L) + SODD_W * sodd_side + MARKET * L
         return market, 1 / (1 + np.exp(-z))
 
-    h_mkt, h_true = true_prob(df["HomeWin%"], df["Home"], df["SODD"])
-    a_mkt, a_true = true_prob(df["AwayWin%"], df["Away"], -df["SODD"])
+    h_mkt, h_true = true_prob(home_pct, df["Home"], df["SODD"])
+    a_mkt, a_true = true_prob(away_pct, df["Away"], -df["SODD"])
     h_ev, a_ev = h_true * df["Home"] - 1, a_true * df["Away"] - 1
     home_ok = (df["Home"] >= MIN_ODDS) & (h_ev >= MIN_EV)
     away_ok = (df["Away"] >= MIN_ODDS) & (a_ev >= MIN_EV)
@@ -720,11 +668,58 @@ def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
     # Where both sides qualify, take the better expected return.
     prefer_home = home_ok[keep] & (~away_ok[keep] | (h_ev[keep] >= a_ev[keep]))
     df = tag_side(df, prefer_home)
-    df["Model %"] = np.where(prefer_home, df["HomeWin%"], df["AwayWin%"]).round(1)
+    df["Model %"] = np.where(prefer_home, home_pct[keep], away_pct[keep]).round(1)
     df["Market %"] = (np.where(prefer_home, h_mkt[keep], a_mkt[keep]) * 100).round(1)
     df["True %"] = (np.where(prefer_home, h_true[keep], a_true[keep]) * 100).round(1)
     df["Edge"] = (np.where(prefer_home, h_ev[keep], a_ev[keep]) * 100).round(1)
     return df
+
+
+def _priced(df: pd.DataFrame, required) -> pd.DataFrame:
+    df = df.copy()
+    for c in required:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=required)
+    return df[(df["Home"] > 1) & (df["Draw"] > 1) & (df["Away"] > 1)]
+
+
+def filter_xg_xsot(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Shots value (2026-11-02), identical to the Discord notifier's XG rule. XGH / XGA are the
+    shots-on-target view of the team ratings (expected goals built from shots on target, not
+    goals). Their Poisson win chance goes through the same calibration as XWin %, with its own
+    constants, and needs an expected return of at least +12% at odds of 2.00 or more.
+    Replayed Mar-Oct out of sample: 183 bets, +39.1%, 7 of 8 months in profit.
+    """
+    MIN_ODDS, MIN_EV = 2.00, 0.12
+    A, MODEL, SODD_W, MARKET = 0.0954, 0.1553, 0.0282, 0.1195
+    if df.empty:
+        return df
+    df = _priced(df, ["Home", "Draw", "Away", "XGH", "XGA", "SODD"])
+    df = df[(df["XGH"] > 0) & (df["XGA"] > 0)]
+    if df.empty:
+        return df
+    home_pct, away_pct = poisson_win_pct(df["XGH"], df["XGA"])
+    out = calibrated_value(df, home_pct, away_pct, MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET)
+    if not out.empty:
+        out["xG Gap"] = (out["XGH"] - out["XGA"]).round(2)
+    return out
+
+
+def filter_xwin_percent(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calibrated value (2026-11-02), identical to the Discord notifier's XWIN rule
+    (footypipe/notify/pregame_criteria.py). Win % now comes from team ratings; see
+    calibrated_value for the formula.
+    """
+    MIN_ODDS, MIN_EV = 2.00, 0.10
+    A, MODEL, SODD_W, MARKET = 0.0991, 0.2229, 0.0299, 0.1171
+    if df.empty:
+        return df
+    df = _priced(df, ["Home", "Draw", "Away", "HomeWin%", "AwayWin%", "SODD"])
+    if df.empty:
+        return df
+    return calibrated_value(df, df["HomeWin%"], df["AwayWin%"], MIN_ODDS, MIN_EV, A, MODEL, SODD_W, MARKET)
 
 
 def filter_head_to_head(df: pd.DataFrame) -> pd.DataFrame:
@@ -909,10 +904,10 @@ FILTERS = {
                      "-0.5), at odds 2.00 or more, with SODD of at least 2, more "
                      "the shorter the price (5.6 at 2.00, 3.7 at 2.50)."),
     "xG / xSoT": (filter_xg_xsot,
-                  "Expected goals and expected shots on target must both "
-                  "favour the same side, with a combined dominance score of "
-                  "at least 4 and a shots-on-target differential against "
-                  "shared opponents of at least 0.6 either way."),
+                  "Value from the shots view: expected goals built from "
+                  "shots on target, the bookmaker's chance and SODD combined "
+                  "into a calibrated chance, with an expected return of at "
+                  "least +12% at odds of 2.00 or more (no upper limit)."),
     "XWin %": (filter_xwin_percent,
                "Value from the team-rating model: its win chance, the "
                "bookmaker's and SODD combined into a calibrated chance, with "
@@ -946,27 +941,27 @@ GLOSSARY = [
     ("Signal", "Strength of the filter's signal. Meaning varies by filter."),
     ("Needs SODD", "SODD filters: the SODD this price requires. It rises as "
                    "the odds shorten, because the market prices favourites well."),
-    ("Min Odds", "xG / xSoT filter: the lowest price it accepts at that "
-                 "signal strength."),
     ("SODD", "Shots-on-target differential against shared opponents over "
              "the last 90 days, recent games counting most, scaled down when "
              "there are few shared opponents (one keeps a third, five keep "
              "71%). Positive favours the home side."),
     ("HCOSOD / ACOSOD", "Each side's own shots-on-target differential "
                         "against those shared opponents."),
-    ("XGH / XGA", "Expected goals, home and away."),
+    ("XGH / XGA", "Expected goals, home and away, from the team ratings' "
+                  "shots-on-target view (what the shots say, not the goals)."),
     ("ESOTH / ESOTA", "Expected shots on target, home and away."),
     ("St.Pos / St.PPG", "League position and points per game."),
     ("Table z / GD (games)", "League filter: how clearly the underdog is the better side on "
                              "goal difference per game, allowing for games played (2+ "
                              "qualifies), and both teams' goal difference and games."),
-    ("Model % vs Market %", "The team-rating model's win probability against "
-                            "the bookmaker's, with the margin removed."),
-    ("True %", "XWin %: the calibrated chance, combining the model, the "
+    ("Model % vs Market %", "The model's win probability (XWin %: team ratings; "
+                            "xG / xSoT: the shots view) against the bookmaker's, "
+                            "with the margin removed."),
+    ("True %", "XWin % and xG / xSoT: the calibrated chance, combining the model, the "
                "bookmaker and SODD, and correcting for long odds being worse "
                "value than they look."),
-    ("Edge", "XWin %: the expected return at this price from the True %, "
-             "in percent. The filter needs at least +10%."),
+    ("Edge", "XWin % and xG / xSoT: the expected return at this price from "
+             "the True %, in percent. XWin % needs +10%, xG / xSoT +12%."),
 ]
 
 
@@ -1054,7 +1049,7 @@ def _paint(intensity: float, target) -> str:
 
 CORE_COLS = ["EventID", "Date", "Kickoff", "HomeTeam", "AwayTeam", "League",
              "Home", "Draw", "Away"]
-SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD", "MinOdds",
+SIGNAL_COLS = ["Added", "Side", "Pick", "AdvOdds", "Implied %", "Signal", "NeedsSODD",
                "Model %", "Market %", "True %", "Edge", "COSOD Adv", "COSOD Opp",
                "ESOT Gap", "xG Gap", "H2H SoT", "H2H Date",
                "Pos Gap", "PPG Ratio", "Table z", "GD (games)"]
