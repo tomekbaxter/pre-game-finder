@@ -564,7 +564,7 @@ def required_sodd(odds: pd.Series, floor: float, a: float, b: float) -> pd.Serie
 # the notifier's thresholds, and only they count in the Alerts tab. Near-misses replayed
 # Mar-Oct made far less than alerts (about break-even to +12%), so they are for watching, not betting.
 NEAR_SODD = 0.85                    # share of the required SODD
-NEAR_COSOD = 0.35                   # COSOD above +0.35 / below -0.35 (alert: 0.5)
+NEAR_COSOD = 0.7                    # COSOD above +0.7 / below -0.7 (alert: 1.0)
 
 
 def mark_status(df: pd.DataFrame, alert: pd.Series) -> pd.DataFrame:
@@ -601,8 +601,8 @@ def filter_sodd(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_sodd_cosod(df: pd.DataFrame) -> pd.DataFrame:
     # 2026-11-02: required |SODD| = max(2.0, 11.5 - 8.5 ln(odds)), odds 2.00 and up,
-    # with the favoured side's COSOD above +0.5 and the other side's below -0.5.
-    FLOOR, A, B, MIN_ODDS, ADV_MIN, WEAK_MAX = 2.0, 11.5, 8.5, 2.00, 0.5, -0.5
+    # with the favoured side's COSOD above +1.0 and the other side's below -1.0 (0.5 until 2026-11-04).
+    FLOOR, A, B, MIN_ODDS, ADV_MIN, WEAK_MAX = 2.0, 11.5, 8.5, 2.00, 1.0, -1.0
     if df.empty:
         return df
 
@@ -987,10 +987,10 @@ FILTERS = {
              "Also shows near misses (85% of that SODD) as Near."),
     "SODD + COSOD": (filter_sodd_cosod,
                      "The favoured side outperformed shared opponents (COSOD "
-                     "above +0.5) while the other underperformed them (below "
-                     "-0.5), at odds 2.00 or more, with SODD of at least 2, more "
+                     "of at least +1 a game) while the other underperformed them (at "
+                     "least -1 a game), at odds 2.00 or more, with SODD of at least 2, more "
                      "the shorter the price (5.6 at 2.00, 3.7 at 2.50). Near: 85% of "
-                     "that SODD, COSOD beyond ±0.35."),
+                     "that SODD, COSOD beyond ±0.7."),
     "xG / xSoT": (filter_xg_xsot,
                   "Value from the shots view: expected goals built from "
                   "shots on target, the bookmaker's chance and SODD combined "
