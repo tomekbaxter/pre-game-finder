@@ -286,6 +286,63 @@ def season_week(dates_desc, fixture_date):
     return (fixture_date - new_season(dates, SEASON_GAP_DAYS)).days / 7
 
 
+THIN_MIN_GAMES = 3                   # the user's thin-data rule (2026-11-07): see thin_mask
+THIN_DAYS = 90
+THIN_H2H_DAYS = 30
+
+
+@st.cache_data(ttl=STANDINGS_TTL)
+def load_team_games(since: dt.date) -> dict:
+    """{team key: [(date, opponent key)]}, every match since `since` in any competition (as the
+    notifier's pregame.preload_team_games)."""
+    m = read_sql(text("""SELECT "Date", "HomeTeam", "AwayTeam" FROM matchstats WHERE "Date" >= :since"""),
+                 params={"since": since})
+    out = {}
+    for d, h, a in zip(m["Date"], m["HomeTeam"], m["AwayTeam"]):
+        if pd.isna(d):
+            continue
+        d = pd.Timestamp(d).date()
+        hk, ak = str(h or "").strip().lower(), str(a or "").strip().lower()
+        out.setdefault(hk, []).append((d, ak))
+        out.setdefault(ak, []).append((d, hk))
+    return out
+
+
+def team_history(rows: dict, fixture_date, team, other):
+    """(games in the 90 days before the fixture, met `other` within 30 days)
+    (pregame_criteria.team_history)."""
+    me, them = str(team or "").strip().lower(), str(other or "").strip().lower()
+    games, met = 0, False
+    for d, opp in rows.get(me, ()):
+        days = (fixture_date - d).days
+        if 0 < days <= THIN_DAYS:
+            games += 1
+            met = met or (opp == them and days <= THIN_H2H_DAYS)
+    return games, met
+
+
+def thin_mask(df: pd.DataFrame) -> pd.Series:
+    """True where either team has 0-2 games in 90 days, there is no common opponent and the teams
+    have not met in 30 days (pregame_criteria.thin_blocks)."""
+    if df.empty:
+        return pd.Series(dtype=bool)
+    days = pd.to_datetime(df["Date"], errors="coerce")
+    first = days.min()
+    if pd.isna(first):
+        return pd.Series(False, index=df.index)
+    rows = load_team_games(first.date() - dt.timedelta(days=THIN_DAYS))
+    com = pd.to_numeric(df.get("ComOpp"), errors="coerce").fillna(0)
+    out = []
+    for d, h, a, c in zip(days, df["HomeTeam"], df["AwayTeam"], com):
+        if pd.isna(d):
+            out.append(False)
+            continue
+        hg, met_h = team_history(rows, d.date(), h, a)
+        ag, met_a = team_history(rows, d.date(), a, h)
+        out.append(min(hg, ag) < THIN_MIN_GAMES and c < 1 and not (met_h or met_a))
+    return pd.Series(out, index=df.index, dtype=bool)
+
+
 def season_weeks(df: pd.DataFrame) -> pd.Series:
     """Weeks into the data league's season for each fixture."""
     if df.empty:
@@ -979,12 +1036,17 @@ def filter_alerts(df: pd.DataFrame) -> pd.DataFrame:
       - H2H or League alone is not enough: with either, at least two filters must pass;
       - stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u (SODD, SODD + COSOD, XWin % and
         xG / xSoT as an exact four count as three);
-      - no alert in the first 4 weeks of the data league's season (2026-11-07).
+      - no alert in the first 4 weeks of the data league's season (2026-11-07);
+      - no alert when either team has 0-2 games in 90 days with no common opponent and no
+        meeting in the last 30 days (2026-11-07).
     """
     if df.empty:
         return df
     weeks = season_weeks(df)
     df = df[~(weeks < SEASON_MIN_WEEKS)]
+    if df.empty:
+        return df
+    df = df[~thin_mask(df)]
     if df.empty:
         return df
     passes = {}                                   # EventID -> [(filter, side)]
@@ -1029,7 +1091,9 @@ FILTERS = {
                "side drop the game, and in cup games between teams from "
                "different leagues XWin %, xG / xSoT and League don't count. "
                "No alerts in the first 4 weeks of a league's season (the model "
-               "only uses this season's data). "
+               "only uses this season's data), and none when either team has "
+               "fewer than 3 games in 90 days unless they share an opponent or "
+               "met in the last 30 days. "
                "Stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u."),
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
