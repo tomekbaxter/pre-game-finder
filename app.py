@@ -254,6 +254,50 @@ def new_season(dates_desc, gap_days: int = 50):
     return dates_desc[-1]
 
 
+SEASON_MIN_WEEKS = 4                 # no pre-game alert before week 4 of the season (2026-11-07)
+SEASON_GAP_DAYS = 50
+
+
+@st.cache_data(ttl=STANDINGS_TTL)
+def load_season_dates(leagues: tuple) -> dict:
+    """{league: distinct match dates before today, newest first}, last ~2 years (as the notifier's
+    pregame.preload_season_dates)."""
+    if not leagues:
+        return {}
+    today = datetime.now(TZ).date()
+    m = read_sql(text("""
+        SELECT DISTINCT "League", "Date" FROM matchstats
+        WHERE "League" = ANY(:leagues) AND "Date" >= :since AND "Date" < :today
+    """), params={"leagues": list(leagues), "since": today - dt.timedelta(days=800), "today": today})
+    out = {}
+    for league, g in m.groupby("League"):
+        out[league] = sorted({pd.Timestamp(d).date() for d in g["Date"].dropna()}, reverse=True)
+    return out
+
+
+def season_week(dates_desc, fixture_date):
+    """Weeks into the league's season (pregame_criteria.season_week): a fixture after a break of
+    50+ days opens a new season (week 0); None without dates."""
+    dates = [d for d in (dates_desc or []) if d < fixture_date]
+    if not dates:
+        return None
+    if (fixture_date - dates[0]).days > SEASON_GAP_DAYS:
+        return 0.0
+    return (fixture_date - new_season(dates, SEASON_GAP_DAYS)).days / 7
+
+
+def season_weeks(df: pd.DataFrame) -> pd.Series:
+    """Weeks into the data league's season for each fixture."""
+    if df.empty:
+        return pd.Series(dtype=float)
+    dl = df["DataLeague"] if "DataLeague" in df.columns else df["League"]
+    dl = dl.where(dl.notna() & (dl != UNKNOWN_DATA_LEAGUE), df["League"])
+    dates = load_season_dates(tuple(sorted(set(dl.dropna()))))
+    days = pd.to_datetime(df["Date"], errors="coerce")
+    return pd.Series([season_week(dates.get(lg), d.date()) if pd.notna(d) else None
+                      for lg, d in zip(dl, days)], index=df.index, dtype=float)
+
+
 @st.cache_data(ttl=STANDINGS_TTL)
 def load_league_tables(leagues: tuple) -> dict:
     """
@@ -934,8 +978,13 @@ def filter_alerts(df: pd.DataFrame) -> pd.DataFrame:
       - filters that disagree on the side drop the fixture;
       - H2H or League alone is not enough: with either, at least two filters must pass;
       - stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u (SODD, SODD + COSOD, XWin % and
-        xG / xSoT as an exact four count as three).
+        xG / xSoT as an exact four count as three);
+      - no alert in the first 4 weeks of the data league's season (2026-11-07).
     """
+    if df.empty:
+        return df
+    weeks = season_weeks(df)
+    df = df[~(weeks < SEASON_MIN_WEEKS)]
     if df.empty:
         return df
     passes = {}                                   # EventID -> [(filter, side)]
@@ -979,6 +1028,8 @@ FILTERS = {
                "H2H or League alone is not enough, filters that disagree on the "
                "side drop the game, and in cup games between teams from "
                "different leagues XWin %, xG / xSoT and League don't count. "
+               "No alerts in the first 4 weeks of a league's season (the model "
+               "only uses this season's data). "
                "Stake: 1 filter 1u, 2-3 filters 2u, 4 or more 3u."),
     "SODD": (filter_sodd,
              "A large shots-on-target differential against shared "
